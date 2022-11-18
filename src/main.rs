@@ -6,7 +6,6 @@ use std::path::Path;
 use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::view::visibility;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
 
@@ -54,6 +53,7 @@ fn main() -> Result<()> {
         .add_system(cursor_events)
         .add_system(file_drop)
         .add_system(change_top_image)
+        .add_system(on_move_image_title)
         .run();
 
     Ok(())
@@ -106,6 +106,15 @@ struct Scale(Vec2);
 #[derive(Component)]
 struct Position(Vec2);
 
+// #[derive(Component)]
+// struct Name(String);
+
+#[derive(Component)]
+struct MyImage;
+
+#[derive(Component)]
+struct MyText;
+
 #[derive(Component)]
 struct MouseState {
     origin: Vec2,
@@ -138,6 +147,25 @@ fn on_load_new_image(
                 Id(index as i8),
                 Scale(Vec2::ONE),
                 Position(Vec2::ZERO),
+                MyImage,
+            ));
+
+            commands.spawn((
+                TextBundle::from_section(
+                    image.to_string(),
+                    TextStyle {
+                        font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
+                        font_size: 12.0,
+                        color: Color::WHITE,
+                    },
+                )
+                .with_text_alignment(TextAlignment::TOP_LEFT)
+                .with_style(Style {
+                    position_type: PositionType::Absolute,
+                    ..default()
+                }),
+                Id(index as i8),
+                MyText,
             ));
         }
         move_image_evw.send(MoveImageEvent);
@@ -159,6 +187,33 @@ fn setup(
             Id(index as i8),
             Scale(Vec2::ONE),
             Position(Vec2::ZERO),
+            MyImage,
+        ));
+        commands.spawn((
+            TextBundle::from_section(
+                image.to_string(),
+                TextStyle {
+                    font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
+                    font_size: 12.0,
+                    color: Color::WHITE,
+                },
+            )
+            .with_text_alignment(TextAlignment::TOP_LEFT)
+            // .with_style(Style {
+            //     position_type: PositionType::Absolute,
+            //     ..default()
+            // }),
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                position: UiRect {
+                    top: Val::Px(5.0),
+                    left: Val::Px(15.0),
+                    ..default()
+                },
+                ..default()
+            }),
+            Id(index as i8),
+            MyText,
         ));
     }
     commands.spawn(GridLayout::Horizontal);
@@ -200,14 +255,17 @@ fn on_move_image(
     windows: Res<Windows>,
     assets: Res<Assets<Image>>,
     asset_server: Res<AssetServer>,
-    mut sprite_position: Query<(
-        &Id,
-        &Handle<Image>,
-        &Position,
-        &Scale,
-        &mut Transform,
-        &mut Sprite,
-    )>,
+    mut sprite_position: Query<
+        (
+            &Id,
+            &Handle<Image>,
+            &Position,
+            &Scale,
+            &mut Transform,
+            &mut Sprite,
+        ),
+        With<MyImage>,
+    >,
     layout_query: Query<&GridLayout>,
     mouse_query: Query<&MouseState>,
 ) {
@@ -268,6 +326,51 @@ fn on_move_image(
     }
 }
 
+fn on_move_image_title(
+    move_image_evr: EventReader<MoveImageEvent>,
+    windows: Res<Windows>,
+    mut text_query: Query<(&Id, &mut Style), With<MyText>>,
+    layout_query: Query<&GridLayout>,
+    mouse_query: Query<&MouseState>,
+) {
+    if move_image_evr.is_empty() {
+        return;
+    }
+    move_image_evr.clear();
+
+    let layout = layout_query.single();
+    let mouse = mouse_query.single();
+    let window = windows.primary();
+    let length = text_query.iter().count();
+
+    let (step_layout, offset_layout) = match layout {
+        GridLayout::Horizontal => {
+            let step = Vec2::new(window.width() / length as f32, 0.);
+            let offset = Vec2::new(0., 0.);
+            (step, offset)
+        }
+        GridLayout::Vertical => {
+            let step = Vec2::new(0., window.height() / length as f32);
+            let offset = Vec2::new(0., 0.);
+            (step, offset)
+        }
+        GridLayout::Stack => {
+            let step = Vec2::new(0., 0.);
+            let offset = Vec2::new(0., 0.);
+            (step, offset)
+        }
+    };
+
+    for (id, mut style) in &mut text_query {
+        let pos = id.0 as f32 * step_layout + offset_layout;
+        style.position = UiRect {
+            top: Val::Px(pos.y),
+            left: Val::Px(pos.x),
+            ..default()
+        };
+    }
+}
+
 fn on_resize_system(
     mut resize_evr: EventReader<WindowResized>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
@@ -280,6 +383,7 @@ fn on_resize_system(
 fn change_layout(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut visibility_query: Query<(&Id, &mut Visibility)>,
     mut layout_query: Query<&mut GridLayout>,
 ) {
     if keys.just_pressed(KeyCode::L) {
@@ -289,13 +393,19 @@ fn change_layout(
             GridLayout::Horizontal => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Stack,
         };
+        for (i, mut visibility) in &mut visibility_query {
+            visibility.is_visible = match *layout {
+                GridLayout::Stack => i.0 == 0,
+                _ => true,
+            }
+        }
         move_image_evw.send(MoveImageEvent);
     }
 }
 fn change_top_image(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut transform_query: Query<&mut Visibility>,
+    mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&GridLayout>,
 ) {
     let index_on_top = if keys.just_pressed(KeyCode::Key1) {
@@ -323,9 +433,9 @@ fn change_top_image(
     };
 
     let layout = layout_query.single();
-    for (i, mut visibility) in transform_query.iter_mut().enumerate() {
+    for (i, mut visibility) in &mut visibility_query {
         visibility.is_visible = match layout {
-            GridLayout::Stack => i == index_on_top - 1,
+            GridLayout::Stack => i.0 == index_on_top - 1,
             _ => true,
         }
     }
