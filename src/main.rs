@@ -47,6 +47,8 @@ fn main() -> Result<()> {
         .add_system(on_resize_system)
         .add_system(change_layout)
         .add_system(scroll_events)
+        .add_system(mouse_button_input)
+        .add_system(cursor_events)
         .run();
 
     Ok(())
@@ -102,6 +104,13 @@ struct Scale(Vec2);
 #[derive(Component)]
 struct Position(Vec2);
 
+#[derive(Component)]
+struct MouseState {
+    origin: Vec2,
+    delta: Vec2,
+    pressed: bool,
+}
+
 struct MoveImageEvent;
 
 fn setup(
@@ -123,6 +132,11 @@ fn setup(
         ));
     }
     commands.spawn(GridLayout::Horizontal);
+    commands.spawn(MouseState {
+        origin: Vec2::ZERO,
+        delta: Vec2::ZERO,
+        pressed: false,
+    });
 }
 
 fn setup_size(
@@ -147,52 +161,61 @@ fn setup_size(
     }
 }
 
+fn bound(vec : Vec2, rect: Rect) -> Vec2 {
+    Vec2::new(vec.x.clamp(rect.min.x, rect.max.x), vec.y.clamp(rect.min.y, rect.max.y))
+}
+
 fn on_move_image(
     _move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     assets: Res<Assets<Image>>,
     asset_server: Res<AssetServer>,
-    mut sprite_position: Query<(&Id, &ImageSize, &Scale, &mut Transform, &mut Sprite)>,
+    mut sprite_position: Query<(
+        &Id,
+        &ImageSize,
+        &Position,
+        &Scale,
+        &mut Transform,
+        &mut Sprite,
+    )>,
     layout_query: Query<&GridLayout>,
+    mouse_query: Query<&MouseState>,
 ) {
     let layout = layout_query.single();
+    let mouse = mouse_query.single();
     let window = windows.primary();
     let length = sprite_position.iter().count();
 
-    let (step, offset, crop) = match layout {
+    let (step_layout, offset_layout, cell_size_layout) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / length as f32, 0.);
             let offset = Vec2::new(-window.width() / 2. + step.x / 2., 0.);
-            let crop = Vec2::new(step.x, window.height());
-            (step, offset, crop)
-        },
+            let cell_size = Vec2::new(step.x, window.height());
+            (step, offset, cell_size)
+        }
         GridLayout::Vertical => {
             let step = Vec2::new(0., window.height() / length as f32);
             let offset = Vec2::new(0., -window.height() / 2. + step.y / 2.);
-            let crop = Vec2::new(window.width(), step.y);
-            (step, offset, crop)
-        },
-        GridLayout::Grid => {(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO)}
+            let cell_size = Vec2::new(window.width(), step.y);
+            (step, offset, cell_size)
+        }
+        GridLayout::Grid => (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
     };
 
-    for (id, size, scale, mut transform, mut sprite) in &mut sprite_position {
-        transform.translation.x = id.0 as f32 * step.x + offset.x;
-        transform.translation.y = id.0 as f32 * step.y + offset.y;
+    for (id, size, position, scale, mut transform, mut sprite) in &mut sprite_position {
+        let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.);
+        transform.translation.x = id.0 as f32 * step_layout.x + offset_layout.x;
+        transform.translation.y = id.0 as f32 * step_layout.y + offset_layout.y;
         transform.scale.x = scale.0.x;
         transform.scale.y = scale.0.y;
         let Some(image_size) = size.0 else {
             return;
         };
-        sprite.rect = Some(Rect::from_center_size(
-            Vec2 {
-                x: image_size.x / 2.,
-                y: image_size.y / 2.,
-            },
-            Vec2 {
-                x: f32::min(image_size.x, crop.x / scale.0.x),
-                y: f32::min(image_size.y, crop.y / scale.0.y),
-            },
-        ));
+        let image_crop = Rect::from_center_size(image_size / 2., image_size);
+        let cell_center_area = Rect::from_center_size(image_size / 2., (image_size - cell_size_layout / scale.0).max(Vec2::ONE));
+        let cell = Rect::from_center_size(bound(image_size / 2. - delta / scale.0, cell_center_area), cell_size_layout / scale.0);
+
+        sprite.rect = Some(cell.intersect(image_crop));
     }
 }
 
@@ -236,6 +259,49 @@ fn scroll_events(
             let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
             scale.0.x *= zoom_factor;
             scale.0.y *= zoom_factor;
+        }
+    }
+    move_image_evw.send(MoveImageEvent);
+}
+
+fn mouse_button_input(
+    buttons: Res<Input<MouseButton>>,
+    windows: Res<Windows>,
+    mut mouse_query: Query<&mut MouseState>,
+    mut position_query: Query<&mut Position>,
+) {
+    if buttons.just_pressed(MouseButton::Left) {
+        let window = windows.get_primary().unwrap();
+        if let Some(cursor_position) = window.cursor_position() {
+            let mut mouse_state = mouse_query.single_mut();
+            mouse_state.pressed = true;
+            mouse_state.origin = cursor_position;
+            mouse_state.delta = Vec2::ZERO;
+        }
+    }
+    if buttons.just_released(MouseButton::Left) {
+        let window = windows.get_primary().unwrap();
+        if let Some(cursor_position) = window.cursor_position() {
+            let mut mouse_state = mouse_query.single_mut();
+            mouse_state.pressed = false;
+            for mut position in &mut position_query {
+                position.0 += cursor_position - mouse_state.origin;
+            }
+            mouse_state.origin = cursor_position;
+            mouse_state.delta = Vec2::ZERO;
+        }
+    }
+}
+
+fn cursor_events(
+    mut cursor_evr: EventReader<CursorMoved>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut mouse_query: Query<&mut MouseState>,
+) {
+    for ev in cursor_evr.iter() {
+        let mut mouse_state = mouse_query.single_mut();
+        if mouse_state.pressed {
+            mouse_state.delta = ev.position - mouse_state.origin;
         }
     }
     move_image_evw.send(MoveImageEvent);
