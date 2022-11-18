@@ -41,14 +41,17 @@ fn main() -> Result<()> {
         .add_plugin(LogDiagnosticsPlugin::default())
         .insert_resource(ImagesFilename(images_filename))
         .add_startup_system(setup)
+        .add_event::<LoadNewImageEvent>()
         .add_event::<MoveImageEvent>()
         .add_system(setup_size)
         .add_system(on_move_image)
         .add_system(on_resize_system)
+        .add_system(on_load_new_image)
         .add_system(change_layout)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
         .add_system(cursor_events)
+        .add_system(file_drop)
         .run();
 
     Ok(())
@@ -96,9 +99,6 @@ enum GridLayout {
 struct Id(i8);
 
 #[derive(Component)]
-struct ImageSize(Option<Vec2>);
-
-#[derive(Component)]
 struct Scale(Vec2);
 
 #[derive(Component)]
@@ -113,6 +113,35 @@ struct MouseState {
 
 struct MoveImageEvent;
 
+struct LoadNewImageEvent;
+
+fn on_load_new_image(
+    mut load_image_evr: EventReader<LoadNewImageEvent>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut commands: Commands,
+    images_filename: Res<ImagesFilename>,
+    asset_server: Res<AssetServer>,
+    images: Query<Entity, With<Id>>,
+) {
+    for _ in load_image_evr.iter() {
+        for entity in &images {
+            commands.entity(entity).despawn();
+        }
+        for (index, image) in images_filename.0.iter().enumerate() {
+            commands.spawn((
+                SpriteBundle {
+                    texture: asset_server.load(image),
+                    ..default()
+                },
+                Id(index as i8),
+                Scale(Vec2::ONE),
+                Position(Vec2::ZERO),
+            ));
+        }
+        move_image_evw.send(MoveImageEvent);
+    }
+}
+
 fn setup(
     mut commands: Commands,
     images_filename: Res<ImagesFilename>,
@@ -126,7 +155,6 @@ fn setup(
                 ..default()
             },
             Id(index as i8),
-            ImageSize(None),
             Scale(Vec2::ONE),
             Position(Vec2::ZERO),
         ));
@@ -141,38 +169,39 @@ fn setup(
 
 fn setup_size(
     mut asset_evr: EventReader<AssetEvent<Image>>,
+    mut move_image_evr: EventWriter<MoveImageEvent>,
     assets: Res<Assets<Image>>,
-    mut query: Query<(&mut ImageSize, &Handle<Image>)>,
 ) {
+    let mut need_redraw = false;
     for ev in asset_evr.iter() {
         match ev {
-            AssetEvent::Created { handle } => {
-                for (mut image_size, image_handle) in &mut query {
-                    if *handle == *image_handle {
-                        let Some(size) = assets.get(image_handle) else {
-                            return;
-                        };
-                        image_size.0 = Some(size.size());
-                    }
-                }
+            AssetEvent::Created { handle } | AssetEvent::Modified { handle } => {
+                need_redraw = true;
+            },
+            AssetEvent::Removed { handle } => {
             }
-            _ => {}
         }
+    }
+    if need_redraw {
+        move_image_evr.send(MoveImageEvent);
     }
 }
 
-fn bound(vec : Vec2, rect: Rect) -> Vec2 {
-    Vec2::new(vec.x.clamp(rect.min.x, rect.max.x), vec.y.clamp(rect.min.y, rect.max.y))
+fn bound(vec: Vec2, rect: Rect) -> Vec2 {
+    Vec2::new(
+        vec.x.clamp(rect.min.x, rect.max.x),
+        vec.y.clamp(rect.min.y, rect.max.y),
+    )
 }
 
 fn on_move_image(
-    _move_image_evr: EventReader<MoveImageEvent>,
+    move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     assets: Res<Assets<Image>>,
     asset_server: Res<AssetServer>,
     mut sprite_position: Query<(
         &Id,
-        &ImageSize,
+        &Handle<Image>,
         &Position,
         &Scale,
         &mut Transform,
@@ -181,6 +210,11 @@ fn on_move_image(
     layout_query: Query<&GridLayout>,
     mouse_query: Query<&MouseState>,
 ) {
+    if move_image_evr.is_empty() {
+        return;
+    }
+    move_image_evr.clear();
+
     let layout = layout_query.single();
     let mouse = mouse_query.single();
     let window = windows.primary();
@@ -202,28 +236,39 @@ fn on_move_image(
         GridLayout::Grid => (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
     };
 
-    for (id, size, position, scale, mut transform, mut sprite) in &mut sprite_position {
+    for (id, image_handle, position, scale, mut transform, mut sprite) in &mut sprite_position {
+        let Some(image) = assets.get(image_handle) else {
+            continue;
+        };
+        let image_size = image.size();
+
         let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.);
         transform.translation.x = id.0 as f32 * step_layout.x + offset_layout.x;
         transform.translation.y = id.0 as f32 * step_layout.y + offset_layout.y;
         transform.scale.x = scale.0.x;
         transform.scale.y = scale.0.y;
-        let Some(image_size) = size.0 else {
-            return;
-        };
+
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
-        let cell_center_area = Rect::from_center_size(image_size / 2., (image_size - cell_size_layout / scale.0).max(Vec2::ONE));
-        let cell = Rect::from_center_size(bound(image_size / 2. - delta / scale.0, cell_center_area), cell_size_layout / scale.0);
+        let cell_center_area = Rect::from_center_size(
+            image_size / 2.,
+            (image_size - cell_size_layout / scale.0).max(Vec2::ONE),
+        );
+        let cell = Rect::from_center_size(
+            bound(image_size / 2. - delta / scale.0, cell_center_area),
+            cell_size_layout / scale.0,
+        );
 
         sprite.rect = Some(cell.intersect(image_crop));
     }
 }
 
 fn on_resize_system(
-    _resize_evr: EventReader<WindowResized>,
+    mut resize_evr: EventReader<WindowResized>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
 ) {
-    move_image_evw.send(MoveImageEvent);
+    for _ in resize_evr.iter() {
+        move_image_evw.send(MoveImageEvent);
+    }
 }
 
 fn change_layout(
@@ -232,14 +277,13 @@ fn change_layout(
     mut layout_query: Query<&mut GridLayout>,
 ) {
     if keys.just_pressed(KeyCode::L) {
-        for mut layout in &mut layout_query {
-            *layout = match *layout {
-                GridLayout::Grid => GridLayout::Horizontal,
-                GridLayout::Horizontal => GridLayout::Vertical,
-                GridLayout::Vertical => GridLayout::Grid,
-            };
-            move_image_evw.send(MoveImageEvent);
-        }
+        let mut layout = layout_query.single_mut();
+        *layout = match *layout {
+            GridLayout::Grid => GridLayout::Horizontal,
+            GridLayout::Horizontal => GridLayout::Vertical,
+            GridLayout::Vertical => GridLayout::Grid,
+        };
+        move_image_evw.send(MoveImageEvent);
     }
 }
 
@@ -260,8 +304,8 @@ fn scroll_events(
             scale.0.x *= zoom_factor;
             scale.0.y *= zoom_factor;
         }
+        move_image_evw.send(MoveImageEvent);
     }
-    move_image_evw.send(MoveImageEvent);
 }
 
 fn mouse_button_input(
@@ -302,7 +346,34 @@ fn cursor_events(
         let mut mouse_state = mouse_query.single_mut();
         if mouse_state.pressed {
             mouse_state.delta = ev.position - mouse_state.origin;
+            move_image_evw.send(MoveImageEvent);
         }
     }
-    move_image_evw.send(MoveImageEvent);
+}
+
+fn file_drop(
+    mut dnd_evr: EventReader<FileDragAndDrop>,
+    mut images_filename: ResMut<ImagesFilename>,
+    mut load_image_evw: EventWriter<LoadNewImageEvent>,
+) {
+    let mut dropping_file = false;
+    for ev in dnd_evr.iter() {
+        if let FileDragAndDrop::DroppedFile { id, path_buf } = ev {
+            if !dropping_file {
+                images_filename.0.clear();
+            }
+            if id.is_primary() {
+                // it was dropped over the main window
+                let Some(image_absolute) = path_buf.as_path().to_str() else {
+                    println!("Can't resolve given path: {:?}", path_buf);
+                    continue;
+                };
+                images_filename.0.push(String::from(image_absolute));
+                dropping_file = true;
+            }
+        }
+    }
+    if dropping_file {
+        load_image_evw.send(LoadNewImageEvent);
+    }
 }
