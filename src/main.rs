@@ -6,6 +6,7 @@ use std::path::Path;
 use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::render::view::visibility;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
 
@@ -43,7 +44,7 @@ fn main() -> Result<()> {
         .add_startup_system(setup)
         .add_event::<LoadNewImageEvent>()
         .add_event::<MoveImageEvent>()
-        .add_system(setup_size)
+        .add_system(on_load_asset)
         .add_system(on_move_image)
         .add_system(on_resize_system)
         .add_system(on_load_new_image)
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
         .add_system(mouse_button_input)
         .add_system(cursor_events)
         .add_system(file_drop)
+        .add_system(change_top_image)
         .run();
 
     Ok(())
@@ -90,7 +92,7 @@ struct ImagesFilename(Vec<String>);
 
 #[derive(Component)]
 enum GridLayout {
-    Grid,
+    Stack,
     Horizontal,
     Vertical,
 }
@@ -167,7 +169,7 @@ fn setup(
     });
 }
 
-fn setup_size(
+fn on_load_asset(
     mut asset_evr: EventReader<AssetEvent<Image>>,
     mut move_image_evr: EventWriter<MoveImageEvent>,
     assets: Res<Assets<Image>>,
@@ -177,9 +179,8 @@ fn setup_size(
         match ev {
             AssetEvent::Created { handle } | AssetEvent::Modified { handle } => {
                 need_redraw = true;
-            },
-            AssetEvent::Removed { handle } => {
             }
+            AssetEvent::Removed { handle } => {}
         }
     }
     if need_redraw {
@@ -233,7 +234,12 @@ fn on_move_image(
             let cell_size = Vec2::new(window.width(), step.y);
             (step, offset, cell_size)
         }
-        GridLayout::Grid => (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
+        GridLayout::Stack => {
+            let step = Vec2::new(0., 0.);
+            let offset = Vec2::new(0., 0.);
+            let cell_size = Vec2::new(window.width(), window.height());
+            (step, offset, cell_size)
+        }
     };
 
     for (id, image_handle, position, scale, mut transform, mut sprite) in &mut sprite_position {
@@ -242,19 +248,19 @@ fn on_move_image(
         };
         let image_size = image.size();
 
-        let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.);
         transform.translation.x = id.0 as f32 * step_layout.x + offset_layout.x;
         transform.translation.y = id.0 as f32 * step_layout.y + offset_layout.y;
         transform.scale.x = scale.0.x;
         transform.scale.y = scale.0.y;
 
+        let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.) / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let cell_center_area = Rect::from_center_size(
             image_size / 2.,
             (image_size - cell_size_layout / scale.0).max(Vec2::ONE),
         );
         let cell = Rect::from_center_size(
-            bound(image_size / 2. - delta / scale.0, cell_center_area),
+            bound(image_size / 2. - delta, cell_center_area),
             cell_size_layout / scale.0,
         );
 
@@ -279,12 +285,52 @@ fn change_layout(
     if keys.just_pressed(KeyCode::L) {
         let mut layout = layout_query.single_mut();
         *layout = match *layout {
-            GridLayout::Grid => GridLayout::Horizontal,
+            GridLayout::Stack => GridLayout::Horizontal,
             GridLayout::Horizontal => GridLayout::Vertical,
-            GridLayout::Vertical => GridLayout::Grid,
+            GridLayout::Vertical => GridLayout::Stack,
         };
         move_image_evw.send(MoveImageEvent);
     }
+}
+fn change_top_image(
+    keys: Res<Input<KeyCode>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut transform_query: Query<&mut Visibility>,
+    layout_query: Query<&GridLayout>,
+) {
+    let index_on_top = if keys.just_pressed(KeyCode::Key1) {
+        1
+    } else if keys.just_pressed(KeyCode::Key2) {
+        2
+    } else if keys.just_pressed(KeyCode::Key3) {
+        3
+    } else if keys.just_pressed(KeyCode::Key4) {
+        4
+    } else if keys.just_pressed(KeyCode::Key5) {
+        5
+    } else if keys.just_pressed(KeyCode::Key6) {
+        6
+    } else if keys.just_pressed(KeyCode::Key7) {
+        7
+    } else if keys.just_pressed(KeyCode::Key8) {
+        8
+    } else if keys.just_pressed(KeyCode::Key9) {
+        9
+    } else if keys.just_pressed(KeyCode::Key0) {
+        10
+    } else {
+        return;
+    };
+
+    let layout = layout_query.single();
+    for (i, mut visibility) in transform_query.iter_mut().enumerate() {
+        visibility.is_visible = match layout {
+            GridLayout::Stack => i == index_on_top - 1,
+            _ => true,
+        }
+    }
+
+    move_image_evw.send(MoveImageEvent);
 }
 
 fn scroll_events(
