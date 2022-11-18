@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 
-use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
+use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
@@ -24,10 +24,8 @@ fn main() {
         )
         .add_plugin(LogDiagnosticsPlugin::default())
         .add_startup_system(setup)
-
         .add_event::<MoveImageEvent>()
         .add_system(on_move_image)
-
         .add_system(on_resize_system)
         .add_system(change_layout)
         .add_system(scroll_events)
@@ -65,9 +63,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(GridLayout::Horizontal);
 }
 
-
 fn on_move_image(
-    mut move_image_evr: EventReader<MoveImageEvent>,
+    _move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     mut sprite_position: Query<(&Id, &mut Transform), With<Handle<Image>>>,
     layout_query: Query<&GridLayout>,
@@ -76,39 +73,35 @@ fn on_move_image(
     let window = windows.primary();
     let length = sprite_position.iter().count();
 
-    for ev in move_image_evr.iter() {
-        match layout {
-            GridLayout::Horizontal => {
-                let step = window.width() / length as f32;
-                let offset = -window.width() / 2. + step / 2.;
+    match layout {
+        GridLayout::Horizontal => {
+            let step = window.width() / length as f32;
+            let offset = -window.width() / 2. + step / 2.;
 
-                for (id, mut transform) in &mut sprite_position {
-                    transform.translation.x = id.0 as f32 * step + offset;
-                    transform.translation.y = 0.;
-                }
+            for (id, mut transform) in &mut sprite_position {
+                transform.translation.x = id.0 as f32 * step + offset;
+                transform.translation.y = 0.;
             }
-            GridLayout::Vertical => {
-                let step = window.height() / length as f32;
-                let offset = -window.height() / 2. + step / 2.;
-
-                for (id, mut transform) in &mut sprite_position {
-                    transform.translation.x = 0.;
-                    transform.translation.y = id.0 as f32 * step + offset;
-                }
-            }
-            GridLayout::Grid => {}
         }
+        GridLayout::Vertical => {
+            let step = window.height() / length as f32;
+            let offset = -window.height() / 2. + step / 2.;
+
+            for (id, mut transform) in &mut sprite_position {
+                transform.translation.x = 0.;
+                transform.translation.y = id.0 as f32 * step + offset;
+            }
+        }
+        GridLayout::Grid => {}
     }
 }
 
-
 fn on_resize_system(
-    resize_evr: EventReader<WindowResized>,
+    _resize_evr: EventReader<WindowResized>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
 ) {
     move_image_evw.send(MoveImageEvent);
 }
-
 
 fn change_layout(
     keys: Res<Input<KeyCode>>,
@@ -127,7 +120,6 @@ fn change_layout(
     }
 }
 
-
 fn scroll_events(
     mut scroll_evr: EventReader<MouseWheel>,
     mut sprite_position: Query<&mut Transform, With<Handle<Image>>>,
@@ -139,7 +131,7 @@ fn scroll_events(
             MouseScrollUnit::Pixel => ev.y,
         };
 
-        for (index, mut transform) in sprite_position.iter_mut().enumerate() {
+        for mut transform in &mut sprite_position {
             let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
             transform.scale.x *= zoom_factor;
             transform.scale.y *= zoom_factor;
