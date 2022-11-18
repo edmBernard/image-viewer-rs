@@ -1,11 +1,27 @@
 #![allow(unused_variables)]
 
+use std::fs::canonicalize;
+use std::path::Path;
+
 use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
+use clap::Parser;
 
-fn main() {
+#[doc(hidden)]
+type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
+
+#[derive(Parser, Debug)]
+#[clap(version, long_about = None)]
+struct Args {
+    /// Images to show
+    images: Vec<String>,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let images_filename = check_all_images_exist(&args.images)?;
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -23,6 +39,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugin(LogDiagnosticsPlugin::default())
+        .insert_resource(ImagesFilename(images_filename))
         .add_startup_system(setup)
         .add_event::<MoveImageEvent>()
         .add_system(on_move_image)
@@ -30,7 +47,40 @@ fn main() {
         .add_system(change_layout)
         .add_system(scroll_events)
         .run();
+
+    Ok(())
 }
+
+fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
+    let mut images_absolute = Vec::new();
+    for image_filename in images {
+        let input_path = Path::new(&image_filename);
+        if !input_path.exists() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Image not found: {}", image_filename),
+            )));
+        }
+        if !input_path.is_file() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Provided Path is not a file: {}", image_filename),
+            )));
+        }
+        let resolved_path = canonicalize(input_path)?;
+        let Some(image_absolute) = resolved_path.as_path().to_str() else {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Can't resolve given path: {}", image_filename),
+            )));
+        };
+        images_absolute.push(String::from(image_absolute));
+    }
+    Ok(images_absolute)
+}
+
+#[derive(Resource)]
+struct ImagesFilename(Vec<String>);
 
 #[derive(Component)]
 enum GridLayout {
@@ -44,14 +94,13 @@ struct Id(i8);
 
 struct MoveImageEvent;
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup(
+    mut commands: Commands,
+    images_filename: Res<ImagesFilename>,
+    asset_server: Res<AssetServer>,
+) {
     commands.spawn(Camera2dBundle::default());
-    let image_list = vec![
-        "/Users/ebernard/Documents/tools/image-viewer/image (3).png",
-        "/Users/ebernard/Documents/tools/image-viewer/image (3).png",
-        "/Users/ebernard/Documents/tools/image-viewer/image (3).png",
-    ];
-    for (index, image) in image_list.into_iter().enumerate() {
+    for (index, image) in images_filename.0.iter().enumerate() {
         commands.spawn((
             SpriteBundle {
                 texture: asset_server.load(image),
