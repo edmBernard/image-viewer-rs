@@ -1,2 +1,7 @@
 /.vscode
 /target
+
+# Data format
+*.png
+*.tiff
+*.jpeg
