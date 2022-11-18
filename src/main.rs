@@ -42,6 +42,7 @@ fn main() -> Result<()> {
         .insert_resource(ImagesFilename(images_filename))
         .add_startup_system(setup)
         .add_event::<MoveImageEvent>()
+        .add_system(setup_size)
         .add_system(on_move_image)
         .add_system(on_resize_system)
         .add_system(change_layout)
@@ -92,6 +93,15 @@ enum GridLayout {
 #[derive(Component)]
 struct Id(i8);
 
+#[derive(Component)]
+struct ImageSize(Option<Vec2>);
+
+#[derive(Component)]
+struct Scale(Vec2);
+
+#[derive(Component)]
+struct Position(Vec2);
+
 struct MoveImageEvent;
 
 fn setup(
@@ -107,41 +117,82 @@ fn setup(
                 ..default()
             },
             Id(index as i8),
+            ImageSize(None),
+            Scale(Vec2::ONE),
+            Position(Vec2::ZERO),
         ));
     }
     commands.spawn(GridLayout::Horizontal);
 }
 
+fn setup_size(
+    mut asset_evr: EventReader<AssetEvent<Image>>,
+    assets: Res<Assets<Image>>,
+    mut query: Query<(&mut ImageSize, &Handle<Image>)>,
+) {
+    for ev in asset_evr.iter() {
+        match ev {
+            AssetEvent::Created { handle } => {
+                for (mut image_size, image_handle) in &mut query {
+                    if *handle == *image_handle {
+                        let Some(size) = assets.get(image_handle) else {
+                            return;
+                        };
+                        image_size.0 = Some(size.size());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn on_move_image(
     _move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
-    mut sprite_position: Query<(&Id, &mut Transform), With<Handle<Image>>>,
+    assets: Res<Assets<Image>>,
+    asset_server: Res<AssetServer>,
+    mut sprite_position: Query<(&Id, &ImageSize, &Scale, &mut Transform, &mut Sprite)>,
     layout_query: Query<&GridLayout>,
 ) {
     let layout = layout_query.single();
     let window = windows.primary();
     let length = sprite_position.iter().count();
 
-    match layout {
+    let (step, offset, crop) = match layout {
         GridLayout::Horizontal => {
-            let step = window.width() / length as f32;
-            let offset = -window.width() / 2. + step / 2.;
-
-            for (id, mut transform) in &mut sprite_position {
-                transform.translation.x = id.0 as f32 * step + offset;
-                transform.translation.y = 0.;
-            }
-        }
+            let step = Vec2::new(window.width() / length as f32, 0.);
+            let offset = Vec2::new(-window.width() / 2. + step.x / 2., 0.);
+            let crop = Vec2::new(step.x, window.height());
+            (step, offset, crop)
+        },
         GridLayout::Vertical => {
-            let step = window.height() / length as f32;
-            let offset = -window.height() / 2. + step / 2.;
+            let step = Vec2::new(0., window.height() / length as f32);
+            let offset = Vec2::new(0., -window.height() / 2. + step.y / 2.);
+            let crop = Vec2::new(window.width(), step.y);
+            (step, offset, crop)
+        },
+        GridLayout::Grid => {(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO)}
+    };
 
-            for (id, mut transform) in &mut sprite_position {
-                transform.translation.x = 0.;
-                transform.translation.y = id.0 as f32 * step + offset;
-            }
-        }
-        GridLayout::Grid => {}
+    for (id, size, scale, mut transform, mut sprite) in &mut sprite_position {
+        transform.translation.x = id.0 as f32 * step.x + offset.x;
+        transform.translation.y = id.0 as f32 * step.y + offset.y;
+        transform.scale.x = scale.0.x;
+        transform.scale.y = scale.0.y;
+        let Some(image_size) = size.0 else {
+            return;
+        };
+        sprite.rect = Some(Rect::from_center_size(
+            Vec2 {
+                x: image_size.x / 2.,
+                y: image_size.y / 2.,
+            },
+            Vec2 {
+                x: f32::min(image_size.x, crop.x / scale.0.x),
+                y: f32::min(image_size.y, crop.y / scale.0.y),
+            },
+        ));
     }
 }
 
@@ -171,7 +222,8 @@ fn change_layout(
 
 fn scroll_events(
     mut scroll_evr: EventReader<MouseWheel>,
-    mut sprite_position: Query<&mut Transform, With<Handle<Image>>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut query: Query<&mut Scale>,
 ) {
     use bevy::input::mouse::MouseScrollUnit;
     for ev in scroll_evr.iter() {
@@ -180,10 +232,11 @@ fn scroll_events(
             MouseScrollUnit::Pixel => ev.y,
         };
 
-        for mut transform in &mut sprite_position {
+        for mut scale in &mut query {
             let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
-            transform.scale.x *= zoom_factor;
-            transform.scale.y *= zoom_factor;
+            scale.0.x *= zoom_factor;
+            scale.0.y *= zoom_factor;
         }
     }
+    move_image_evw.send(MoveImageEvent);
 }
