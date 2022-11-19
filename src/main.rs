@@ -45,12 +45,14 @@ fn main() -> Result<()> {
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
+        .add_event::<ResetVisibilityEvent>()
         .add_system(change_layout)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
         .add_system(cursor_events)
         .add_system(file_drop)
         .add_system(change_top_image)
+        .add_system(on_reset_visibility)
         .add_system(on_resize_system)
         .add_system(on_image_loaded)
         .add_system(on_move_image)
@@ -95,6 +97,8 @@ struct MouseState {
 }
 
 struct MoveImageEvent;
+
+struct ResetVisibilityEvent;
 
 struct NewImageLoadedEvent {
     handle: Handle<Image>,
@@ -186,6 +190,7 @@ fn on_load_image(
 fn on_image_loaded(
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
     mut count_query: Query<&mut TotalImageLoaded>,
@@ -234,7 +239,7 @@ fn on_image_loaded(
             Id(ev.index),
             MyText,
         ));
-
+        reset_vis_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
     }
 }
@@ -299,8 +304,13 @@ fn on_move_image(
             );
             let cell_size = step.abs();
             let get_position = move |index| {
-                let row_index = f32::floor(index / grid_height);
-                let col_index = f32::rem_euclid(index, grid_width);
+                let (row_index, col_index) = if grid_height == 1. {
+                    (0., index)
+                } else {
+                    let row_index = f32::floor(index / grid_height);
+                    let col_index = f32::rem_euclid(index, grid_width);
+                    (row_index, col_index)
+                };
                 Vec2::new(col_index, row_index) * step + offset
             };
             (Box::new(get_position), cell_size)
@@ -362,8 +372,13 @@ fn on_move_image_title(
             let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
 
             let get_position = move |index| {
-                let row_index = f32::floor(index / grid_height);
-                let col_index = f32::rem_euclid(index, grid_width);
+                let (row_index, col_index) = if grid_height == 1. {
+                    (0., index)
+                } else {
+                    let row_index = f32::floor(index / grid_height);
+                    let col_index = f32::rem_euclid(index, grid_width);
+                    (row_index, col_index)
+                };
                 Vec2::new(col_index, row_index) * step
             };
             Box::new(get_position)
@@ -389,10 +404,26 @@ fn on_resize_system(
     }
 }
 
+fn on_reset_visibility(
+    mut reset_evr: EventReader<ResetVisibilityEvent>,
+    mut visibility_query: Query<(&Id, &mut Visibility)>,
+    layout_query: Query<&mut GridLayout>,
+) {
+    for _ in reset_evr.iter() {
+        let layout = layout_query.single();
+        for (i, mut visibility) in &mut visibility_query {
+            visibility.is_visible = match *layout {
+                GridLayout::Stack => i.0 == 0,
+                _ => true,
+            }
+        }
+    }
+}
+
 fn change_layout(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut visibility_query: Query<(&Id, &mut Visibility)>,
+    mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut layout_query: Query<&mut GridLayout>,
 ) {
     if keys.just_pressed(KeyCode::L) {
@@ -403,12 +434,7 @@ fn change_layout(
             GridLayout::Stack => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Horizontal,
         };
-        for (i, mut visibility) in &mut visibility_query {
-            visibility.is_visible = match *layout {
-                GridLayout::Stack => i.0 == 0,
-                _ => true,
-            }
-        }
+        reset_vix_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
     }
 }
