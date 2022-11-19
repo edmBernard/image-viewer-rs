@@ -6,9 +6,9 @@ use std::path::Path;
 use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::texture::{CompressedImageFormats, ImageTextureLoader};
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
+use image::{ColorType, DynamicImage};
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -63,33 +63,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
-    let mut images_absolute = Vec::new();
-    for image_filename in images {
-        let input_path = Path::new(&image_filename);
-        if !input_path.exists() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Image not found: {}", image_filename),
-            )));
-        }
-        if !input_path.is_file() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Provided Path is not a file: {}", image_filename),
-            )));
-        }
-        let resolved_path = canonicalize(input_path)?;
-        let Some(image_absolute) = resolved_path.as_path().to_str() else {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Can't resolve given path: {}", image_filename),
-            )));
-        };
-        images_absolute.push(String::from(image_absolute));
-    }
-    Ok(images_absolute)
-}
 
 #[derive(Resource)]
 struct InitialImagesFilename(Vec<String>);
@@ -141,20 +114,64 @@ struct LoadNewImageEvent {
     count: i8,
 }
 
+fn setup(
+    mut commands: Commands,
+    images_filename: ResMut<InitialImagesFilename>,
+    asset_server: Res<AssetServer>,
+    mut load_image_evw: EventWriter<LoadNewImageEvent>,
+) {
+
+    commands.spawn(Camera2dBundle::default());
+    commands.spawn(GridLayout::Horizontal);
+    commands.spawn(TotalImageLoaded(0));
+    commands.spawn(MouseState {
+        origin: Vec2::ZERO,
+        delta: Vec2::ZERO,
+        pressed: false,
+    });
+
+    let count = images_filename.0.len();
+    for (index, image) in images_filename.0.iter().enumerate() {
+        load_image_evw.send(LoadNewImageEvent { path: image.clone(), index: index as i8, count: count as i8});
+    }
+}
+
+
 fn on_load_image(
     mut load_evr: EventReader<LoadNewImageEvent>,
     mut loaded_evw: EventWriter<NewImageLoadedEvent>,
     mut images: ResMut<Assets<Image>>,
 ) {
     for ev in load_evr.iter() {
-        let new_image = Image::from_dynamic(image::open(&ev.path).unwrap(), true);
-        let handle = images.add(new_image);
-        loaded_evw.send(NewImageLoadedEvent {
-            handle: handle,
-            path: ev.path.clone(),
-            index: ev.index,
-            count: ev.count,
-        });
+        let Ok(image) = image::open(&ev.path) else {
+            continue;
+        };
+        match image.color() {
+            ColorType::Rgb8 | ColorType::Rgba8 => {
+                let new_image = Image::from_dynamic(image, true);
+                let handle = images.add(new_image);
+                loaded_evw.send(NewImageLoadedEvent {
+                    handle: handle,
+                    path: ev.path.clone(),
+                    index: ev.index,
+                    count: ev.count,
+                });
+            },
+            ColorType::Rgb16 | ColorType::Rgba16 => {
+                let image_8u = DynamicImage::ImageRgb8(image.into_rgb8());
+                let new_image = Image::from_dynamic(image_8u, true);
+                let handle = images.add(new_image);
+                loaded_evw.send(NewImageLoadedEvent {
+                    handle: handle,
+                    path: ev.path.clone(),
+                    index: ev.index,
+                    count: ev.count,
+                });
+            },
+            _ => {
+                println!("image.color(): {:?}", image.color())
+            }
+        }
     }
 }
 
@@ -213,27 +230,7 @@ fn on_image_loaded(
     }
 }
 
-fn setup(
-    mut commands: Commands,
-    images_filename: ResMut<InitialImagesFilename>,
-    asset_server: Res<AssetServer>,
-    mut load_image_evw: EventWriter<LoadNewImageEvent>,
-) {
 
-    commands.spawn(Camera2dBundle::default());
-    commands.spawn(GridLayout::Horizontal);
-    commands.spawn(TotalImageLoaded(0));
-    commands.spawn(MouseState {
-        origin: Vec2::ZERO,
-        delta: Vec2::ZERO,
-        pressed: false,
-    });
-
-    let count = images_filename.0.len();
-    for (index, image) in images_filename.0.iter().enumerate() {
-        load_image_evw.send(LoadNewImageEvent { path: image.clone(), index: index as i8, count: count as i8});
-    }
-}
 
 fn on_load_asset(
     mut asset_evr: EventReader<AssetEvent<Image>>,
@@ -254,12 +251,6 @@ fn on_load_asset(
     }
 }
 
-fn bound(vec: Vec2, rect: Rect) -> Vec2 {
-    Vec2::new(
-        vec.x.clamp(rect.min.x, rect.max.x),
-        vec.y.clamp(rect.min.y, rect.max.y),
-    )
-}
 
 fn on_move_image(
     move_image_evr: EventReader<MoveImageEvent>,
@@ -544,4 +535,41 @@ fn file_drop(
             count: count as i8,
         });
     }
+}
+
+
+fn bound(vec: Vec2, rect: Rect) -> Vec2 {
+    Vec2::new(
+        vec.x.clamp(rect.min.x, rect.max.x),
+        vec.y.clamp(rect.min.y, rect.max.y),
+    )
+}
+
+
+fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
+    let mut images_absolute = Vec::new();
+    for image_filename in images {
+        let input_path = Path::new(&image_filename);
+        if !input_path.exists() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Image not found: {}", image_filename),
+            )));
+        }
+        if !input_path.is_file() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Provided Path is not a file: {}", image_filename),
+            )));
+        }
+        let resolved_path = canonicalize(input_path)?;
+        let Some(image_absolute) = resolved_path.as_path().to_str() else {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Can't resolve given path: {}", image_filename),
+            )));
+        };
+        images_absolute.push(String::from(image_absolute));
+    }
+    Ok(images_absolute)
 }
