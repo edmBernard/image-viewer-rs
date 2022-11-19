@@ -47,6 +47,7 @@ fn main() -> Result<()> {
         .add_event::<MoveImageEvent>()
         .add_event::<ResetVisibilityEvent>()
         .add_system(change_layout)
+        .add_system(change_zoom)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
         .add_system(cursor_events)
@@ -126,7 +127,7 @@ fn setup(
     mut fonts: ResMut<Assets<Font>>,
 ) {
     commands.spawn(Camera2dBundle::default());
-    commands.spawn(GridLayout::Horizontal);
+    commands.spawn(GridLayout::Grid);
     commands.spawn(TotalImageLoaded(0));
     commands.spawn(MouseState {
         origin: Vec2::ZERO,
@@ -429,15 +430,16 @@ fn change_layout(
     if keys.just_pressed(KeyCode::L) {
         let mut layout = layout_query.single_mut();
         *layout = match *layout {
-            GridLayout::Horizontal => GridLayout::Grid,
             GridLayout::Grid => GridLayout::Stack,
             GridLayout::Stack => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Horizontal,
+            GridLayout::Horizontal => GridLayout::Grid,
         };
         reset_vix_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
     }
 }
+
 fn change_top_image(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
@@ -479,10 +481,38 @@ fn change_top_image(
     move_image_evw.send(MoveImageEvent);
 }
 
+fn change_zoom(
+    keys: Res<Input<KeyCode>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut query: Query<(&mut Scale, &mut Position)>,
+) {
+    let scale_factor = if keys.just_pressed(KeyCode::A) {
+        0.
+    } else if keys.just_pressed(KeyCode::Z) {
+        1.
+    } else if keys.just_pressed(KeyCode::E) {
+        3.
+    } else if keys.just_pressed(KeyCode::R) {
+        4.
+    } else if keys.just_pressed(KeyCode::T) {
+        5.
+    } else {
+        return;
+    };
+    for (mut scale, mut position) in &mut query {
+        let zoom_factor = (2_f32).powf(scale_factor);
+        scale.0.x = zoom_factor;
+        scale.0.y = zoom_factor;
+        position.0 *= zoom_factor;
+    }
+
+    move_image_evw.send(MoveImageEvent);
+}
+
 fn scroll_events(
     mut scroll_evr: EventReader<MouseWheel>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut query: Query<&mut Scale>,
+    mut query: Query<(&mut Scale, &mut Position)>,
 ) {
     use bevy::input::mouse::MouseScrollUnit;
     for ev in scroll_evr.iter() {
@@ -491,10 +521,11 @@ fn scroll_events(
             MouseScrollUnit::Pixel => ev.y,
         };
 
-        for mut scale in &mut query {
+        for (mut scale, mut position) in &mut query {
             let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
             scale.0.x *= zoom_factor;
             scale.0.y *= zoom_factor;
+            position.0 *= zoom_factor;
         }
         move_image_evw.send(MoveImageEvent);
     }

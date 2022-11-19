@@ -13,14 +13,21 @@ Simple image viewer that allow to compare image either side-by-side or by switch
 
 ### Change layout
 
-There are 3 layout available
-- horizontal
-- vertical
+There are 4 layouts available
+- grid
 - stacked
+- vertical
+- horizontal
 
 ### Change image on top (in Stacked Layout)
 
 When images are stacked, it is possible to bring the image on top by using the 1, 2, ... keyboard keys.
+
+### Change zoom
+
+There is 2 way to change the zoom :
+- mouse scroll
+- keyboard key: A,Z,E,R,T set a fixed zoom of respectively 1,2,4,8,16
 
 ## Image Format supported
 
