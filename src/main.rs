@@ -106,6 +106,9 @@ struct NewImageLoadedEvent {
 #[derive(Component)]
 struct TotalImageLoaded(i8);
 
+#[derive(Component)]
+struct FontHandle(Handle<Font>);
+
 struct LoadNewImageEvent {
     path: String,
     index: i8,
@@ -116,6 +119,7 @@ fn setup(
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
+    mut fonts: ResMut<Assets<Font>>,
 ) {
     commands.spawn(Camera2dBundle::default());
     commands.spawn(GridLayout::Horizontal);
@@ -125,6 +129,11 @@ fn setup(
         delta: Vec2::ZERO,
         pressed: false,
     });
+
+    let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
+    let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
+    let font_handle = fonts.add(font);
+    commands.spawn(FontHandle(font_handle));
 
     let count = images_filename.0.len();
     for (index, image) in images_filename.0.iter().enumerate() {
@@ -181,9 +190,11 @@ fn on_image_loaded(
     asset_server: Res<AssetServer>,
     images: Query<Entity, With<Id>>,
     mut count_query: Query<&mut TotalImageLoaded>,
+    font_query: Query<&FontHandle>,
 ) {
     for ev in load_image_evr.iter() {
         let mut already_loaded = count_query.single_mut();
+        let font = font_query.single();
 
         if already_loaded.0 == 0 {
             for entity in &images {
@@ -211,7 +222,7 @@ fn on_image_loaded(
             TextBundle::from_section(
                 short_path,
                 TextStyle {
-                    font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
+                    font: font.0.clone(),
                     font_size: 14.0,
                     color: Color::WHITE,
                 },
