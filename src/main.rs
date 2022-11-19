@@ -1,4 +1,4 @@
-#![allow(unused_variables)]
+// #![allow(unused_variables)]
 
 use std::fs::canonicalize;
 use std::path::Path;
@@ -46,7 +46,6 @@ fn main() -> Result<()> {
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
-        .add_system(on_load_asset)
         .add_system(on_move_image)
         .add_system(on_resize_system)
         .add_system(on_image_loaded)
@@ -62,7 +61,6 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
 
 #[derive(Resource)]
 struct InitialImagesFilename(Vec<String>);
@@ -117,10 +115,8 @@ struct LoadNewImageEvent {
 fn setup(
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
-    asset_server: Res<AssetServer>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
 ) {
-
     commands.spawn(Camera2dBundle::default());
     commands.spawn(GridLayout::Horizontal);
     commands.spawn(TotalImageLoaded(0));
@@ -132,10 +128,13 @@ fn setup(
 
     let count = images_filename.0.len();
     for (index, image) in images_filename.0.iter().enumerate() {
-        load_image_evw.send(LoadNewImageEvent { path: image.clone(), index: index as i8, count: count as i8});
+        load_image_evw.send(LoadNewImageEvent {
+            path: image.clone(),
+            index: index as i8,
+            count: count as i8,
+        });
     }
 }
-
 
 fn on_load_image(
     mut load_evr: EventReader<LoadNewImageEvent>,
@@ -156,7 +155,7 @@ fn on_load_image(
                     index: ev.index,
                     count: ev.count,
                 });
-            },
+            }
             ColorType::Rgb16 | ColorType::Rgba16 => {
                 let image_8u = DynamicImage::ImageRgb8(image.into_rgb8());
                 let new_image = Image::from_dynamic(image_8u, true);
@@ -167,7 +166,7 @@ fn on_load_image(
                     index: ev.index,
                     count: ev.count,
                 });
-            },
+            }
             _ => {
                 println!("image.color(): {:?}", image.color())
             }
@@ -179,7 +178,6 @@ fn on_image_loaded(
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut commands: Commands,
-    images_filename: Res<InitialImagesFilename>,
     asset_server: Res<AssetServer>,
     images: Query<Entity, With<Id>>,
     mut count_query: Query<&mut TotalImageLoaded>,
@@ -230,33 +228,10 @@ fn on_image_loaded(
     }
 }
 
-
-
-fn on_load_asset(
-    mut asset_evr: EventReader<AssetEvent<Image>>,
-    mut move_image_evr: EventWriter<MoveImageEvent>,
-    assets: Res<Assets<Image>>,
-) {
-    let mut need_redraw = false;
-    for ev in asset_evr.iter() {
-        match ev {
-            AssetEvent::Created { handle } | AssetEvent::Modified { handle } => {
-                need_redraw = true;
-            }
-            AssetEvent::Removed { handle } => {}
-        }
-    }
-    if need_redraw {
-        move_image_evr.send(MoveImageEvent);
-    }
-}
-
-
 fn on_move_image(
     move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     assets: Res<Assets<Image>>,
-    asset_server: Res<AssetServer>,
     mut sprite_position: Query<
         (
             &Id,
@@ -332,8 +307,7 @@ fn on_move_image_title(
     move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     mut text_query: Query<(&Id, &mut Style), With<MyText>>,
-    layout_query: Query<&GridLayout>,
-    mouse_query: Query<&MouseState>,
+    layout_query: Query<&GridLayout>
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -341,7 +315,6 @@ fn on_move_image_title(
     move_image_evr.clear();
 
     let layout = layout_query.single();
-    let mouse = mouse_query.single();
     let window = windows.primary();
     let length = text_query.iter().count();
 
@@ -537,14 +510,12 @@ fn file_drop(
     }
 }
 
-
 fn bound(vec: Vec2, rect: Rect) -> Vec2 {
     Vec2::new(
         vec.x.clamp(rect.min.x, rect.max.x),
         vec.y.clamp(rect.min.y, rect.max.y),
     )
 }
-
 
 fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
     let mut images_absolute = Vec::new();
