@@ -1,9 +1,9 @@
-#![allow(unused_variables)]
+// #![allow(unused_variables)]
+#![windows_subsystem = "windows"]
 
 use std::fs::canonicalize;
 use std::path::Path;
 
-use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
@@ -40,7 +40,6 @@ fn main() -> Result<()> {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
-        .add_plugin(LogDiagnosticsPlugin::default())
         .insert_resource(InitialImagesFilename(images_filename))
         .add_startup_system(setup)
         .add_event::<LoadNewImageEvent>()
