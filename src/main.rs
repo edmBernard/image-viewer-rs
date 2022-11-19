@@ -1,4 +1,4 @@
-// #![allow(unused_variables)]
+#![allow(unused_variables)]
 
 use std::fs::canonicalize;
 use std::path::Path;
@@ -70,6 +70,7 @@ enum GridLayout {
     Stack,
     Horizontal,
     Vertical,
+    Grid,
 }
 
 #[derive(Component)]
@@ -257,24 +258,40 @@ fn on_move_image(
     let window = windows.primary();
     let length = sprite_position.iter().count();
 
-    let (step_layout, offset_layout, cell_size_layout) = match layout {
+    let (get_position, cell_size_layout): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / length as f32, 0.);
             let offset = Vec2::new(-window.width() / 2. + step.x / 2., 0.);
             let cell_size = Vec2::new(step.x, window.height());
-            (step, offset, cell_size)
+            let get_position = move |index| index * step + offset;
+            (Box::new(get_position), cell_size)
         }
         GridLayout::Vertical => {
-            let step = Vec2::new(0., window.height() / length as f32);
-            let offset = Vec2::new(0., -window.height() / 2. + step.y / 2.);
-            let cell_size = Vec2::new(window.width(), step.y);
-            (step, offset, cell_size)
+            let step = Vec2::new(0., -window.height() / length as f32);
+            let offset = Vec2::new(0., window.height() / 2. + step.y / 2.);
+            let cell_size = Vec2::new(window.width(), step.y.abs());
+            let get_position = move |index| index * step + offset;
+            (Box::new(get_position), cell_size)
         }
         GridLayout::Stack => {
             let step = Vec2::new(0., 0.);
             let offset = Vec2::new(0., 0.);
             let cell_size = Vec2::new(window.width(), window.height());
-            (step, offset, cell_size)
+            let get_position = move |index| index * step + offset;
+            (Box::new(get_position), cell_size)
+        }
+        GridLayout::Grid => {
+            let grid_width = (length as f32).sqrt().ceil();
+            let grid_height = (length as f32 / grid_width).ceil();
+            let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
+            let offset = Vec2::new(-window.width() / 2. + step.x / 2., window.height() / 2. + step.y / 2.);
+            let cell_size = step.abs();
+            let get_position = move |index| {
+                let row_index = f32::floor(index / grid_height);
+                let col_index = f32::rem_euclid(index, grid_width);
+                Vec2::new(col_index, row_index) * step + offset
+            };
+            (Box::new(get_position), cell_size)
         }
     };
 
@@ -284,10 +301,8 @@ fn on_move_image(
         };
         let image_size = image.size();
 
-        transform.translation.x = id.0 as f32 * step_layout.x + offset_layout.x;
-        transform.translation.y = id.0 as f32 * step_layout.y + offset_layout.y;
-        transform.scale.x = scale.0.x;
-        transform.scale.y = scale.0.y;
+        transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
+        transform.scale = scale.0.extend(1.);
 
         let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.) / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
@@ -308,7 +323,7 @@ fn on_move_image_title(
     move_image_evr: EventReader<MoveImageEvent>,
     windows: Res<Windows>,
     mut text_query: Query<(&Id, &mut Style), With<MyText>>,
-    layout_query: Query<&GridLayout>
+    layout_query: Query<&GridLayout>,
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -319,26 +334,34 @@ fn on_move_image_title(
     let window = windows.primary();
     let length = text_query.iter().count();
 
-    let (step_layout, offset_layout) = match layout {
+    let get_position: Box<dyn Fn(f32) -> Vec2> = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / length as f32, 0.);
-            let offset = Vec2::new(0., 0.);
-            (step, offset)
+            Box::new(move |index| index * step)
         }
         GridLayout::Vertical => {
             let step = Vec2::new(0., window.height() / length as f32);
-            let offset = Vec2::new(0., 0.);
-            (step, offset)
+            Box::new(move |index| index * step)
         }
         GridLayout::Stack => {
-            let step = Vec2::new(0., 0.);
-            let offset = Vec2::new(0., 0.);
-            (step, offset)
+            Box::new(move |_| Vec2::ZERO)
+        }
+        GridLayout::Grid => {
+            let grid_width = (length as f32).sqrt().ceil();
+            let grid_height = (length as f32 / grid_width).ceil();
+            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
+
+            let get_position = move |index| {
+                let row_index = f32::floor(index / grid_height);
+                let col_index = f32::rem_euclid(index, grid_width);
+                Vec2::new(col_index, row_index) * step
+            };
+            Box::new(get_position)
         }
     };
 
     for (id, mut style) in &mut text_query {
-        let pos = id.0 as f32 * step_layout + offset_layout;
+        let pos = get_position(id.0 as f32);
         style.position = UiRect {
             top: Val::Px(pos.y + 2.),
             left: Val::Px(pos.x + 5.),
@@ -365,9 +388,10 @@ fn change_layout(
     if keys.just_pressed(KeyCode::L) {
         let mut layout = layout_query.single_mut();
         *layout = match *layout {
-            GridLayout::Stack => GridLayout::Horizontal,
-            GridLayout::Horizontal => GridLayout::Vertical,
-            GridLayout::Vertical => GridLayout::Stack,
+            GridLayout::Horizontal => GridLayout::Grid,
+            GridLayout::Grid => GridLayout::Stack,
+            GridLayout::Stack => GridLayout::Vertical,
+            GridLayout::Vertical => GridLayout::Horizontal,
         };
         for (i, mut visibility) in &mut visibility_query {
             visibility.is_visible = match *layout {
@@ -546,6 +570,6 @@ fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
     Ok(images_absolute)
 }
 
-fn get_short_name(path : &String) -> Option<&str> {
+fn get_short_name(path: &String) -> Option<&str> {
     Path::new(path).file_name()?.to_str()
 }

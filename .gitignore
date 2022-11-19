@@ -5,3 +5,6 @@
 *.png
 *.tiff
 *.jpeg
+
+# macOS
+.DS_Store
