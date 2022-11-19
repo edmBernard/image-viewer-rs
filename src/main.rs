@@ -187,7 +187,6 @@ fn on_image_loaded(
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     images: Query<Entity, With<Id>>,
     mut count_query: Query<&mut TotalImageLoaded>,
     font_query: Query<&FontHandle>,
@@ -224,7 +223,7 @@ fn on_image_loaded(
                 TextStyle {
                     font: font.0.clone(),
                     font_size: 14.0,
-                    color: Color::WHITE,
+                    color: Color::GREEN,
                 },
             )
             .with_text_alignment(TextAlignment::TOP_LEFT)
@@ -294,7 +293,10 @@ fn on_move_image(
             let grid_width = (length as f32).sqrt().ceil();
             let grid_height = (length as f32 / grid_width).ceil();
             let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
-            let offset = Vec2::new(-window.width() / 2. + step.x / 2., window.height() / 2. + step.y / 2.);
+            let offset = Vec2::new(
+                -window.width() / 2. + step.x / 2.,
+                window.height() / 2. + step.y / 2.,
+            );
             let cell_size = step.abs();
             let get_position = move |index| {
                 let row_index = f32::floor(index / grid_height);
@@ -322,7 +324,7 @@ fn on_move_image(
         );
         let cell = Rect::from_center_size(
             bound(image_size / 2. - delta, cell_center_area),
-            cell_size_layout / scale.0,
+            (cell_size_layout - 2.) / scale.0,
         );
 
         sprite.rect = Some(cell.intersect(image_crop));
@@ -353,9 +355,7 @@ fn on_move_image_title(
             let step = Vec2::new(0., window.height() / length as f32);
             Box::new(move |index| index * step)
         }
-        GridLayout::Stack => {
-            Box::new(move |_| Vec2::ZERO)
-        }
+        GridLayout::Stack => Box::new(move |_| Vec2::ZERO),
         GridLayout::Grid => {
             let grid_width = (length as f32).sqrt().ceil();
             let grid_height = (length as f32 / grid_width).ceil();
