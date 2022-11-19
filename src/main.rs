@@ -46,15 +46,15 @@ fn main() -> Result<()> {
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
-        .add_system(on_move_image)
-        .add_system(on_resize_system)
-        .add_system(on_image_loaded)
         .add_system(change_layout)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
         .add_system(cursor_events)
         .add_system(file_drop)
         .add_system(change_top_image)
+        .add_system(on_resize_system)
+        .add_system(on_image_loaded)
+        .add_system(on_move_image)
         .add_system(on_move_image_title)
         .add_system(on_load_image)
         .run();
@@ -206,12 +206,13 @@ fn on_image_loaded(
             MyImage,
         ));
 
+        let short_path = get_short_name(&ev.path).unwrap_or("");
         commands.spawn((
             TextBundle::from_section(
-                &ev.path,
+                short_path,
                 TextStyle {
                     font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
-                    font_size: 12.0,
+                    font_size: 14.0,
                     color: Color::WHITE,
                 },
             )
@@ -339,8 +340,8 @@ fn on_move_image_title(
     for (id, mut style) in &mut text_query {
         let pos = id.0 as f32 * step_layout + offset_layout;
         style.position = UiRect {
-            top: Val::Px(pos.y),
-            left: Val::Px(pos.x),
+            top: Val::Px(pos.y + 2.),
+            left: Val::Px(pos.x + 5.),
             ..default()
         };
     }
@@ -543,4 +544,8 @@ fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
         images_absolute.push(String::from(image_absolute));
     }
     Ok(images_absolute)
+}
+
+fn get_short_name(path : &String) -> Option<&str> {
+    Path::new(path).file_name()?.to_str()
 }
