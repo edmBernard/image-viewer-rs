@@ -6,5 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.9.0", features = ["jpeg"] }
+bevy = { version = "0.9.0", features = ["jpeg", "bmp", "bevy_render"] }
 clap = { version = "3.2.22", features = ["derive"] }
+image = "0.24.5"

@@ -6,6 +6,7 @@ use std::path::Path;
 use bevy::diagnostic::LogDiagnosticsPlugin;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::render::texture::{CompressedImageFormats, ImageTextureLoader};
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
 
@@ -22,6 +23,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let images_filename = check_all_images_exist(&args.images)?;
+
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -39,14 +41,15 @@ fn main() -> Result<()> {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugin(LogDiagnosticsPlugin::default())
-        .insert_resource(ImagesFilename(images_filename))
+        .insert_resource(InitialImagesFilename(images_filename))
         .add_startup_system(setup)
         .add_event::<LoadNewImageEvent>()
+        .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
         .add_system(on_load_asset)
         .add_system(on_move_image)
         .add_system(on_resize_system)
-        .add_system(on_load_new_image)
+        .add_system(on_image_loaded)
         .add_system(change_layout)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
@@ -54,6 +57,7 @@ fn main() -> Result<()> {
         .add_system(file_drop)
         .add_system(change_top_image)
         .add_system(on_move_image_title)
+        .add_system(on_load_image)
         .run();
 
     Ok(())
@@ -88,7 +92,7 @@ fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
 }
 
 #[derive(Resource)]
-struct ImagesFilename(Vec<String>);
+struct InitialImagesFilename(Vec<String>);
 
 #[derive(Component)]
 enum GridLayout {
@@ -106,9 +110,6 @@ struct Scale(Vec2);
 #[derive(Component)]
 struct Position(Vec2);
 
-// #[derive(Component)]
-// struct Name(String);
-
 #[derive(Component)]
 struct MyImage;
 
@@ -124,74 +125,75 @@ struct MouseState {
 
 struct MoveImageEvent;
 
-struct LoadNewImageEvent;
+struct NewImageLoadedEvent {
+    handle: Handle<Image>,
+    path: String,
+    index: i8,
+    count: i8,
+}
 
-fn on_load_new_image(
-    mut load_image_evr: EventReader<LoadNewImageEvent>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut commands: Commands,
-    images_filename: Res<ImagesFilename>,
-    asset_server: Res<AssetServer>,
-    images: Query<Entity, With<Id>>,
+#[derive(Component)]
+struct TotalImageLoaded(i8);
+
+struct LoadNewImageEvent {
+    path: String,
+    index: i8,
+    count: i8,
+}
+
+fn on_load_image(
+    mut load_evr: EventReader<LoadNewImageEvent>,
+    mut loaded_evw: EventWriter<NewImageLoadedEvent>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    for _ in load_image_evr.iter() {
-        for entity in &images {
-            commands.entity(entity).despawn();
-        }
-        for (index, image) in images_filename.0.iter().enumerate() {
-            commands.spawn((
-                SpriteBundle {
-                    texture: asset_server.load(image),
-                    ..default()
-                },
-                Id(index as i8),
-                Scale(Vec2::ONE),
-                Position(Vec2::ZERO),
-                MyImage,
-            ));
-
-            commands.spawn((
-                TextBundle::from_section(
-                    image.to_string(),
-                    TextStyle {
-                        font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
-                        font_size: 12.0,
-                        color: Color::WHITE,
-                    },
-                )
-                .with_text_alignment(TextAlignment::TOP_LEFT)
-                .with_style(Style {
-                    position_type: PositionType::Absolute,
-                    ..default()
-                }),
-                Id(index as i8),
-                MyText,
-            ));
-        }
-        move_image_evw.send(MoveImageEvent);
+    for ev in load_evr.iter() {
+        let new_image = Image::from_dynamic(image::open(&ev.path).unwrap(), true);
+        let handle = images.add(new_image);
+        loaded_evw.send(NewImageLoadedEvent {
+            handle: handle,
+            path: ev.path.clone(),
+            index: ev.index,
+            count: ev.count,
+        });
     }
 }
 
-fn setup(
+fn on_image_loaded(
+    mut load_image_evr: EventReader<NewImageLoadedEvent>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
     mut commands: Commands,
-    images_filename: Res<ImagesFilename>,
+    images_filename: Res<InitialImagesFilename>,
     asset_server: Res<AssetServer>,
+    images: Query<Entity, With<Id>>,
+    mut count_query: Query<&mut TotalImageLoaded>,
 ) {
-    commands.spawn(Camera2dBundle::default());
-    for (index, image) in images_filename.0.iter().enumerate() {
+    for ev in load_image_evr.iter() {
+        let mut already_loaded = count_query.single_mut();
+
+        if already_loaded.0 == 0 {
+            for entity in &images {
+                commands.entity(entity).despawn();
+            }
+        }
+        already_loaded.0 += 1;
+        if already_loaded.0 >= ev.count {
+            already_loaded.0 = 0;
+        }
+
         commands.spawn((
             SpriteBundle {
-                texture: asset_server.load(image),
+                texture: ev.handle.clone(),
                 ..default()
             },
-            Id(index as i8),
+            Id(ev.index),
             Scale(Vec2::ONE),
             Position(Vec2::ZERO),
             MyImage,
         ));
+
         commands.spawn((
             TextBundle::from_section(
-                image.to_string(),
+                &ev.path,
                 TextStyle {
                     font: asset_server.load("fonts/IBMPlexMono-Regular.otf"),
                     font_size: 12.0,
@@ -199,29 +201,38 @@ fn setup(
                 },
             )
             .with_text_alignment(TextAlignment::TOP_LEFT)
-            // .with_style(Style {
-            //     position_type: PositionType::Absolute,
-            //     ..default()
-            // }),
             .with_style(Style {
                 position_type: PositionType::Absolute,
-                position: UiRect {
-                    top: Val::Px(5.0),
-                    left: Val::Px(15.0),
-                    ..default()
-                },
                 ..default()
             }),
-            Id(index as i8),
+            Id(ev.index),
             MyText,
         ));
+
+        move_image_evw.send(MoveImageEvent);
     }
+}
+
+fn setup(
+    mut commands: Commands,
+    images_filename: ResMut<InitialImagesFilename>,
+    asset_server: Res<AssetServer>,
+    mut load_image_evw: EventWriter<LoadNewImageEvent>,
+) {
+
+    commands.spawn(Camera2dBundle::default());
     commands.spawn(GridLayout::Horizontal);
+    commands.spawn(TotalImageLoaded(0));
     commands.spawn(MouseState {
         origin: Vec2::ZERO,
         delta: Vec2::ZERO,
         pressed: false,
     });
+
+    let count = images_filename.0.len();
+    for (index, image) in images_filename.0.iter().enumerate() {
+        load_image_evw.send(LoadNewImageEvent { path: image.clone(), index: index as i8, count: count as i8});
+    }
 }
 
 fn on_load_asset(
@@ -509,27 +520,28 @@ fn cursor_events(
 
 fn file_drop(
     mut dnd_evr: EventReader<FileDragAndDrop>,
-    mut images_filename: ResMut<ImagesFilename>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
 ) {
-    let mut dropping_file = false;
+    let mut images_filename = Vec::new();
+
     for ev in dnd_evr.iter() {
         if let FileDragAndDrop::DroppedFile { id, path_buf } = ev {
-            if !dropping_file {
-                images_filename.0.clear();
-            }
             if id.is_primary() {
                 // it was dropped over the main window
                 let Some(image_absolute) = path_buf.as_path().to_str() else {
                     println!("Can't resolve given path: {:?}", path_buf);
                     continue;
                 };
-                images_filename.0.push(String::from(image_absolute));
-                dropping_file = true;
+                images_filename.push(String::from(image_absolute));
             }
         }
     }
-    if dropping_file {
-        load_image_evw.send(LoadNewImageEvent);
+    let count = images_filename.iter().count();
+    for (index, filename) in images_filename.into_iter().enumerate() {
+        load_image_evw.send(LoadNewImageEvent {
+            path: filename,
+            index: index as i8,
+            count: count as i8,
+        });
     }
 }
