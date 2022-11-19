@@ -46,6 +46,18 @@ cargo build --release
 
 The executable is named `image-viewer-rs`
 
+### Bundle for macOS
+
+Install [cargo-bundle](https://github.com/burtonageo/cargo-bundle). and run the following command :
+
+```bash
+cargo bundle
+```
+
+It will generate a `image-viewer.app`.
+
+*Note*: Creating a bundle on osx allow to remove the execution of terminal in background of the GUI.
+
 ## Disclaimer
 
 It's a toy project mainly used to learn bevy. So if you spot error, improvement comments are welcome.

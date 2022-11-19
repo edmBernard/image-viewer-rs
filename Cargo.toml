@@ -6,6 +6,7 @@ license-file = "LICENSE"
 authors = ["Erwan BERNARD"]
 homepage = "https://github.com/edmBernard/image-viewer-rs"
 description = "Image Viewer that allow comparison side-by-side, in grid or in stack."
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -15,4 +16,4 @@ image = "0.24.5"
 
 [package.metadata.bundle]
 identifier = "io.github.edmbernard.image-viewer-rs"
-resources = ["assets/"]
+resources = ["assets/"]  # Shiped assets are not currently used. But I bundle license copy.
