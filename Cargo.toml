@@ -16,4 +16,5 @@ image = "0.24.5"
 
 [package.metadata.bundle]
 identifier = "io.github.edmbernard.image-viewer-rs"
-resources = ["assets/"]  # Shiped assets are not currently used. But I bundle license copy.
+resources = ["assets/"]  # Shipped assets are not currently used. But it allow to bundle license copy.
+icon = ["assets/icons/128x128.png", "assets/icons/128x128@2x.png", "assets/icons/256x256.png", "assets/icons/256x256@2x.png"]
