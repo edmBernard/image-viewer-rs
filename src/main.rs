@@ -446,25 +446,26 @@ fn change_top_image(
     mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&GridLayout>,
 ) {
-    let index_on_top = if keys.just_pressed(KeyCode::Key1) {
+    let modifier_pressed = keys.pressed(KeyCode::LShift) || keys.pressed(KeyCode::RShift);
+    let index_on_top = if modifier_pressed && keys.just_pressed(KeyCode::Key1) {
         1
-    } else if keys.just_pressed(KeyCode::Key2) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key2) {
         2
-    } else if keys.just_pressed(KeyCode::Key3) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key3) {
         3
-    } else if keys.just_pressed(KeyCode::Key4) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key4) {
         4
-    } else if keys.just_pressed(KeyCode::Key5) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key5) {
         5
-    } else if keys.just_pressed(KeyCode::Key6) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key6) {
         6
-    } else if keys.just_pressed(KeyCode::Key7) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key7) {
         7
-    } else if keys.just_pressed(KeyCode::Key8) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key8) {
         8
-    } else if keys.just_pressed(KeyCode::Key9) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key9) {
         9
-    } else if keys.just_pressed(KeyCode::Key0) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key0) {
         10
     } else {
         return;
