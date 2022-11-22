@@ -305,13 +305,8 @@ fn on_move_image(
             );
             let cell_size = step.abs();
             let get_position = move |index| {
-                let (row_index, col_index) = if grid_height == 1. {
-                    (0., index)
-                } else {
-                    let row_index = f32::floor(index / grid_height);
-                    let col_index = f32::rem_euclid(index, grid_width);
-                    (row_index, col_index)
-                };
+                let row_index = f32::floor(index / grid_width);
+                let col_index = f32::rem_euclid(index, grid_width);
                 Vec2::new(col_index, row_index) * step + offset
             };
             (Box::new(get_position), cell_size)
@@ -373,13 +368,9 @@ fn on_move_image_title(
             let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
 
             let get_position = move |index| {
-                let (row_index, col_index) = if grid_height == 1. {
-                    (0., index)
-                } else {
-                    let row_index = f32::floor(index / grid_height);
-                    let col_index = f32::rem_euclid(index, grid_width);
-                    (row_index, col_index)
-                };
+
+                let row_index = f32::floor(index / grid_width);
+                let col_index = f32::rem_euclid(index, grid_width);
                 Vec2::new(col_index, row_index) * step
             };
             Box::new(get_position)
