@@ -29,7 +29,11 @@ When images are stacked, it is possible to bring the image on top by using the `
 
 There is 2 way to change the zoom :
 - mouse scroll
-- keyboard key: `A`,`Z`,`E`,`R`,`T` set a fixed zoom of respectively 1,2,4,8,16
+- keyboard key: `Ctrl` + `1`,`2`,`3`,`4`,`5` set a fixed zoom of respectively 1,2,4,8,16
+
+### Change Rotation
+
+We can quarter turn image by pressing `R` keyboard key.
 
 ## Image Format supported
 

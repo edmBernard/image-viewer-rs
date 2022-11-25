@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage};
+use std::f32::consts::{TAU, PI};
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -53,6 +54,7 @@ fn main() -> Result<()> {
         .add_system(cursor_events)
         .add_system(file_drop)
         .add_system(change_top_image)
+        .add_system(change_rotation_image)
         .add_system(on_reset_visibility)
         .add_system(on_resize_system)
         .add_system(on_image_loaded)
@@ -83,6 +85,10 @@ struct Scale(Vec2);
 
 #[derive(Component)]
 struct Position(Vec2);
+
+/// Rotation in quarter turn (1 is 1 turn)
+#[derive(Component)]
+struct Rotation(f32);
 
 #[derive(Component)]
 struct MyImage;
@@ -219,6 +225,7 @@ fn on_image_loaded(
             Id(ev.index),
             Scale(Vec2::ONE),
             Position(Vec2::ZERO),
+            Rotation(0.),
             MyImage,
         ));
 
@@ -255,6 +262,7 @@ fn on_move_image(
             &Handle<Image>,
             &Position,
             &Scale,
+            &Rotation,
             &mut Transform,
             &mut Sprite,
         ),
@@ -313,7 +321,7 @@ fn on_move_image(
         }
     };
 
-    for (id, image_handle, position, scale, mut transform, mut sprite) in &mut sprite_position {
+    for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in &mut sprite_position {
         let Some(image) = assets.get(image_handle) else {
             continue;
         };
@@ -321,16 +329,17 @@ fn on_move_image(
 
         transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
         transform.scale = scale.0.extend(1.);
-
-        let delta = (position.0 + mouse.delta) * Vec2::new(1., -1.) / scale.0;
+        transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
+        let delta = Vec2::from_angle(PI/2. * rotation.0).rotate(position.0 + mouse.delta) * Vec2::new(1., -1.) / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let cell_center_area = Rect::from_center_size(
             image_size / 2.,
             (image_size - cell_size_layout / scale.0).max(Vec2::ONE),
         );
+        let rotate_cell_size = if rotation.0 % 2. == 0. { cell_size_layout } else { Vec2::new(cell_size_layout.y, cell_size_layout.x )};
         let cell = Rect::from_center_size(
             bound(image_size / 2. - delta, cell_center_area),
-            (cell_size_layout - 2.) / scale.0,
+            (rotate_cell_size - 2.) / scale.0,
         );
 
         sprite.rect = Some(cell.intersect(image_crop));
@@ -473,20 +482,34 @@ fn change_top_image(
     move_image_evw.send(MoveImageEvent);
 }
 
+fn change_rotation_image(
+    keys: Res<Input<KeyCode>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut rotation_query: Query<&mut Rotation, With<MyImage>>,
+) {
+    if keys.just_pressed(KeyCode::R) {
+        for mut rotation in &mut rotation_query {
+            rotation.0 += 1.;
+        }
+    };
+    move_image_evw.send(MoveImageEvent);
+}
+
 fn change_zoom(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut query: Query<(&mut Scale, &mut Position)>,
 ) {
-    let scale_factor = if keys.just_pressed(KeyCode::A) {
+    let modifier_pressed = keys.pressed(KeyCode::LControl) || keys.pressed(KeyCode::RControl);
+    let scale_factor = if modifier_pressed && keys.just_pressed(KeyCode::Key1) {
         0.
-    } else if keys.just_pressed(KeyCode::Z) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key2) {
         1.
-    } else if keys.just_pressed(KeyCode::E) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key3) {
         3.
-    } else if keys.just_pressed(KeyCode::R) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key4) {
         4.
-    } else if keys.just_pressed(KeyCode::T) {
+    } else if modifier_pressed && keys.just_pressed(KeyCode::Key5) {
         5.
     } else {
         return;
