@@ -21,6 +21,17 @@ struct Args {
     images: Vec<String>,
 }
 
+const HELP_STRING: &'static str = "
+Keyboard Shortcut:
+    L: Change Layout (Grid, Stack, Horizontal, Vertical)
+    R: Rotate images
+    1, 2, 3, ...: Move Image on top
+    Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
+    H: Toggle this help
+
+    Drag and Drop image from files explorer.
+";
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let images_filename = check_all_images_exist(&args.images)?;
@@ -61,6 +72,7 @@ fn main() -> Result<()> {
         .add_system(on_move_image)
         .add_system(on_move_image_title)
         .add_system(on_load_image)
+        .add_system(toggle_help)
         .run();
 
     Ok(())
@@ -95,6 +107,9 @@ struct MyImage;
 
 #[derive(Component)]
 struct MyText;
+
+#[derive(Component)]
+struct MyHelp;
 
 #[derive(Component)]
 struct MouseState {
@@ -144,7 +159,29 @@ fn setup(
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
     let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
     let font_handle = fonts.add(font);
-    commands.spawn(FontHandle(font_handle));
+    commands.spawn(FontHandle(font_handle.clone()));
+
+    commands.spawn((
+        TextBundle::from_section(
+            HELP_STRING,
+            TextStyle {
+                font: font_handle,
+                font_size: 18.0,
+                color: Color::ANTIQUE_WHITE,
+            },
+        )
+        .with_text_alignment(TextAlignment::TOP_LEFT)
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            position: UiRect {
+                top: Val::Px(22.),
+                left: Val::Px(5.),
+                ..default()
+            },
+            ..default()
+        }),
+        MyHelp,
+    ));
 
     let count = images_filename.0.len();
     for (index, image) in images_filename.0.iter().enumerate() {
@@ -201,6 +238,7 @@ fn on_image_loaded(
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
     mut count_query: Query<&mut TotalImageLoaded>,
+    mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
 ) {
     for ev in load_image_evr.iter() {
@@ -249,6 +287,9 @@ fn on_image_loaded(
         ));
         reset_vis_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
+
+        let mut visibility = help_query.single_mut();
+        visibility.is_visible = false;
     }
 }
 
@@ -407,7 +448,7 @@ fn on_resize_system(
 
 fn on_reset_visibility(
     mut reset_evr: EventReader<ResetVisibilityEvent>,
-    mut visibility_query: Query<(&Id, &mut Visibility)>,
+    mut visibility_query: Query<(&Id, &mut Visibility), With<MyImage>>,
     layout_query: Query<&mut GridLayout>,
 ) {
     for _ in reset_evr.iter() {
@@ -522,6 +563,16 @@ fn change_zoom(
     }
 
     move_image_evw.send(MoveImageEvent);
+}
+
+fn toggle_help(
+    keys: Res<Input<KeyCode>>,
+    mut query: Query<&mut Visibility, With<MyHelp>>,
+) {
+    if keys.just_pressed(KeyCode::H) {
+        let mut visibility = query.single_mut();
+        visibility.is_visible = !visibility.is_visible;
+    }
 }
 
 fn scroll_events(
