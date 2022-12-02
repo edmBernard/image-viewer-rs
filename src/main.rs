@@ -3,6 +3,7 @@
 
 use std::fs::canonicalize;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
@@ -59,6 +60,7 @@ fn main() -> Result<()> {
         .add_event::<MoveImageEvent>()
         .add_event::<ResetVisibilityEvent>()
         .add_system(change_layout)
+        .add_system(change_layout_on_click)
         .add_system(change_zoom)
         .add_system(scroll_events)
         .add_system(mouse_button_input)
@@ -482,6 +484,38 @@ fn change_layout(
             GridLayout::Stack => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Horizontal,
             GridLayout::Horizontal => GridLayout::Grid,
+        };
+        reset_vix_evw.send(ResetVisibilityEvent);
+        move_image_evw.send(MoveImageEvent);
+    }
+}
+
+fn change_layout_on_click(
+    buttons: Res<Input<MouseButton>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
+    mut layout_query: Query<&mut GridLayout>,
+    mut click_timer: Local<Option<Instant>>,
+) {
+    if buttons.just_pressed(MouseButton::Left) {
+        let now = Instant::now();
+        let Some(double_click_time) = *click_timer else {
+            *click_timer = Some(now);
+            return;
+        };
+
+        if now > double_click_time + Duration::from_millis(300) {
+            *click_timer = Some(now);
+            return;
+        }
+        *click_timer = Some(now);
+
+        let mut layout = layout_query.single_mut();
+        *layout = match *layout {
+            GridLayout::Grid => GridLayout::Stack,
+            GridLayout::Stack => GridLayout::Grid,
+            GridLayout::Vertical => GridLayout::Horizontal,
+            GridLayout::Horizontal => GridLayout::Vertical,
         };
         reset_vix_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
