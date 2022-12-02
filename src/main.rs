@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage};
-use std::f32::consts::{TAU, PI};
+use std::f32::consts::{PI, TAU};
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -362,7 +362,9 @@ fn on_move_image(
         }
     };
 
-    for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in &mut sprite_position {
+    for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in
+        &mut sprite_position
+    {
         let Some(image) = assets.get(image_handle) else {
             continue;
         };
@@ -371,13 +373,19 @@ fn on_move_image(
         transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
         transform.scale = scale.0.extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
-        let delta = Vec2::from_angle(PI/2. * rotation.0).rotate(position.0 + mouse.delta) * Vec2::new(1., -1.) / scale.0;
+        let delta = Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta)
+            * Vec2::new(1., -1.)
+            / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
+        let rotate_cell_size = if rotation.0 % 2. == 0. {
+            cell_size_layout
+        } else {
+            Vec2::new(cell_size_layout.y, cell_size_layout.x)
+        };
         let cell_center_area = Rect::from_center_size(
             image_size / 2.,
-            (image_size - cell_size_layout / scale.0).max(Vec2::ONE),
+            (image_size - rotate_cell_size / scale.0).max(Vec2::ONE),
         );
-        let rotate_cell_size = if rotation.0 % 2. == 0. { cell_size_layout } else { Vec2::new(cell_size_layout.y, cell_size_layout.x )};
         let cell = Rect::from_center_size(
             bound(image_size / 2. - delta, cell_center_area),
             (rotate_cell_size - 2.) / scale.0,
@@ -418,7 +426,6 @@ fn on_move_image_title(
             let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
 
             let get_position = move |index| {
-
                 let row_index = f32::floor(index / grid_width);
                 let col_index = f32::rem_euclid(index, grid_width);
                 Vec2::new(col_index, row_index) * step
@@ -448,7 +455,7 @@ fn on_resize_system(
 
 fn on_reset_visibility(
     mut reset_evr: EventReader<ResetVisibilityEvent>,
-    mut visibility_query: Query<(&Id, &mut Visibility), With<MyImage>>,
+    mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&mut GridLayout>,
 ) {
     for _ in reset_evr.iter() {
@@ -565,10 +572,7 @@ fn change_zoom(
     move_image_evw.send(MoveImageEvent);
 }
 
-fn toggle_help(
-    keys: Res<Input<KeyCode>>,
-    mut query: Query<&mut Visibility, With<MyHelp>>,
-) {
+fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With<MyHelp>>) {
     if keys.just_pressed(KeyCode::H) {
         let mut visibility = query.single_mut();
         visibility.is_visible = !visibility.is_visible;
