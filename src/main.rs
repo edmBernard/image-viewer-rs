@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::window::{PresentMode, WindowDescriptor, WindowResized};
+use bevy::window::{Window, PresentMode, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage};
 use std::f32::consts::{PI, TAU};
@@ -41,14 +41,12 @@ fn main() -> Result<()> {
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
-                    window: WindowDescriptor {
+                    primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
-                        width: 500.,
-                        height: 300.,
+                        resolution: [500., 300.].into(),
                         present_mode: PresentMode::AutoVsync,
-                        // always_on_top: true,
                         ..default()
-                    },
+                    }),
                     ..default()
                 })
                 .set(ImagePlugin::default_nearest()),
@@ -71,6 +69,7 @@ fn main() -> Result<()> {
         .add_system(on_reset_visibility)
         .add_system(on_resize_system)
         .add_system(on_image_loaded)
+        .add_system(on_move_cursor)
         .add_system(on_move_image)
         .add_system(on_move_image_title)
         .add_system(on_load_image)
@@ -103,6 +102,9 @@ struct Position(Vec2);
 /// Rotation in quarter turn (1 is 1 turn)
 #[derive(Component)]
 struct Rotation(f32);
+
+#[derive(Component)]
+struct MyCursor;
 
 #[derive(Component)]
 struct MyImage;
@@ -144,6 +146,7 @@ struct LoadNewImageEvent {
 }
 
 fn setup(
+    mut windows: Query<&mut Window>,
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
@@ -157,6 +160,8 @@ fn setup(
         delta: Vec2::ZERO,
         pressed: false,
     });
+    let mut window = windows.single_mut();
+    window.cursor.icon = CursorIcon::Crosshair;
 
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
     let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
@@ -172,7 +177,7 @@ fn setup(
                 color: Color::ANTIQUE_WHITE,
             },
         )
-        .with_text_alignment(TextAlignment::TOP_LEFT)
+        .with_text_alignment(TextAlignment::Left)
         .with_style(Style {
             position_type: PositionType::Absolute,
             position: UiRect {
@@ -269,17 +274,35 @@ fn on_image_loaded(
             MyImage,
         ));
 
+        commands.spawn((
+            TextBundle::from_section(
+                "+",
+                TextStyle {
+                    font: font.0.clone(),
+                    font_size: 28.0,
+                    color: Color::ORANGE_RED,
+                },
+            )
+            .with_text_alignment(TextAlignment::Center)
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                ..default()
+            }),
+            Id(ev.index),
+            MyCursor,
+        ));
+
         let short_path = get_short_name(&ev.path).unwrap_or("");
         commands.spawn((
             TextBundle::from_section(
                 short_path,
                 TextStyle {
                     font: font.0.clone(),
-                    font_size: 14.0,
+                    font_size: 16.0,
                     color: Color::GREEN,
                 },
             )
-            .with_text_alignment(TextAlignment::TOP_LEFT)
+            .with_text_alignment(TextAlignment::Left)
             .with_style(Style {
                 position_type: PositionType::Absolute,
                 ..default()
@@ -291,13 +314,13 @@ fn on_image_loaded(
         move_image_evw.send(MoveImageEvent);
 
         let mut visibility = help_query.single_mut();
-        visibility.is_visible = false;
+        *visibility = Visibility::Hidden;
     }
 }
 
 fn on_move_image(
-    move_image_evr: EventReader<MoveImageEvent>,
-    windows: Res<Windows>,
+    mut move_image_evr: EventReader<MoveImageEvent>,
+    windows: Query<&Window>,
     assets: Res<Assets<Image>>,
     mut sprite_position: Query<
         (
@@ -321,7 +344,7 @@ fn on_move_image(
 
     let layout = layout_query.single();
     let mouse = mouse_query.single();
-    let window = windows.primary();
+    let window = windows.single();
     let length = sprite_position.iter().count();
 
     let (get_position, cell_size_layout): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
@@ -398,8 +421,8 @@ fn on_move_image(
 }
 
 fn on_move_image_title(
-    move_image_evr: EventReader<MoveImageEvent>,
-    windows: Res<Windows>,
+    mut move_image_evr: EventReader<MoveImageEvent>,
+    windows: Query<&Window>,
     mut text_query: Query<(&Id, &mut Style), With<MyText>>,
     layout_query: Query<&GridLayout>,
 ) {
@@ -409,7 +432,7 @@ fn on_move_image_title(
     move_image_evr.clear();
 
     let layout = layout_query.single();
-    let window = windows.primary();
+    let window = windows.single();
     let length = text_query.iter().count();
 
     let get_position: Box<dyn Fn(f32) -> Vec2> = match layout {
@@ -446,6 +469,59 @@ fn on_move_image_title(
     }
 }
 
+
+fn on_move_cursor(
+    windows: Query<&Window>,
+    mut cursor_query: Query<(&Id, &mut Style, &CalculatedSize), With<MyCursor>>,
+    layout_query: Query<&GridLayout>,
+) {
+    let layout = layout_query.single();
+    let window = windows.single();
+    let length = cursor_query.iter().count();
+
+    let (get_position, cell_size): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
+        GridLayout::Horizontal => {
+            let step = Vec2::new(window.width() / length as f32, 0.);
+            let cell_size = Vec2::new(step.x, window.height());
+            (Box::new(move |index| index * step), cell_size)
+        }
+        GridLayout::Vertical => {
+            let step = Vec2::new(0., -window.height() / length as f32);
+            let cell_size = Vec2::new(window.width(), step.y.abs());
+            (Box::new(move |index| index * step), cell_size)
+        }
+        GridLayout::Stack => {
+            let cell_size = Vec2::new(window.width(), window.height());
+            (Box::new(move |_| Vec2::ZERO), cell_size)
+        },
+        GridLayout::Grid => {
+            let grid_width = (length as f32).sqrt().ceil();
+            let grid_height = (length as f32 / grid_width).ceil();
+            let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
+            let cell_size = step.abs();
+            let get_position = move |index| {
+                let row_index = f32::floor(index / grid_width);
+                let col_index = f32::rem_euclid(index, grid_width);
+                Vec2::new(col_index, row_index) * step
+            };
+            (Box::new(get_position), cell_size)
+        }
+    };
+
+    let Some(cursor_position) = window.cursor_position() else {
+        return;
+    };
+    for (id, mut style, size) in &mut cursor_query {
+        let pos = get_position(id.0 as f32);
+        style.position = UiRect {
+            top: Val::Px(pos.y + cell_size.y - f32::rem_euclid(cursor_position.y, cell_size.y) - size.size.y / 2.),
+            left: Val::Px(pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - size.size.x / 2.),
+            ..default()
+        };
+    }
+}
+
+
 fn on_resize_system(
     mut resize_evr: EventReader<WindowResized>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
@@ -463,9 +539,9 @@ fn on_reset_visibility(
     for _ in reset_evr.iter() {
         let layout = layout_query.single();
         for (i, mut visibility) in &mut visibility_query {
-            visibility.is_visible = match *layout {
-                GridLayout::Stack => i.0 == 0,
-                _ => true,
+            *visibility = match *layout {
+                GridLayout::Stack => if i.0 == 0 { Visibility::Visible } else { Visibility::Hidden },
+                _ => Visibility::Visible,
             }
         }
     }
@@ -555,10 +631,10 @@ fn change_top_image(
 
     let layout = layout_query.single();
     for (i, mut visibility) in &mut visibility_query {
-        visibility.is_visible = match layout {
-            GridLayout::Stack => i.0 == index_on_top - 1,
-            _ => true,
-        }
+        *visibility = match layout {
+            GridLayout::Stack => if i.0 == index_on_top - 1 { Visibility::Visible } else { Visibility::Hidden },
+            _ => Visibility::Visible,
+        };
     }
 
     move_image_evw.send(MoveImageEvent);
@@ -609,7 +685,11 @@ fn change_zoom(
 fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With<MyHelp>>) {
     if keys.just_pressed(KeyCode::H) {
         let mut visibility = query.single_mut();
-        visibility.is_visible = !visibility.is_visible;
+        *visibility = match *visibility {
+            Visibility::Visible => Visibility::Hidden,
+            Visibility::Hidden => Visibility::Visible,
+            Visibility::Inherited => Visibility::Inherited
+        };
     }
 }
 
@@ -637,12 +717,12 @@ fn scroll_events(
 
 fn mouse_button_input(
     buttons: Res<Input<MouseButton>>,
-    windows: Res<Windows>,
+    windows: Query<&Window>,
     mut mouse_query: Query<&mut MouseState>,
     mut position_query: Query<&mut Position>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {
-        let window = windows.get_primary().unwrap();
+        let window = windows.single();
         if let Some(cursor_position) = window.cursor_position() {
             let mut mouse_state = mouse_query.single_mut();
             mouse_state.pressed = true;
@@ -651,7 +731,7 @@ fn mouse_button_input(
         }
     }
     if buttons.just_released(MouseButton::Left) {
-        let window = windows.get_primary().unwrap();
+        let window = windows.single();
         if let Some(cursor_position) = window.cursor_position() {
             let mut mouse_state = mouse_query.single_mut();
             mouse_state.pressed = false;
@@ -685,15 +765,13 @@ fn file_drop(
     let mut images_filename = Vec::new();
 
     for ev in dnd_evr.iter() {
-        if let FileDragAndDrop::DroppedFile { id, path_buf } = ev {
-            if id.is_primary() {
-                // it was dropped over the main window
-                let Some(image_absolute) = path_buf.as_path().to_str() else {
-                    println!("Can't resolve given path: {:?}", path_buf);
-                    continue;
-                };
-                images_filename.push(String::from(image_absolute));
-            }
+        if let FileDragAndDrop::DroppedFile { path_buf, ..} = ev {
+
+            let Some(image_absolute) = path_buf.as_path().to_str() else {
+                println!("Can't resolve given path: {:?}", path_buf);
+                continue;
+            };
+            images_filename.push(String::from(image_absolute));
         }
     }
     let count = images_filename.iter().count();

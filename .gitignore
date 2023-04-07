@@ -2,7 +2,7 @@
 /target
 
 # Data format
-*.png
+# *.png
 *.tiff
 *.jpeg
 

@@ -10,9 +10,9 @@ description = "Image Viewer that allow comparison side-by-side, in grid or in st
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.9.0", features = ["jpeg", "bmp", "bevy_render"] }
-clap = { version = "3.2.22", features = ["derive"] }
-image = "0.24.5"
+bevy = { version = "0.10.1", features = ["jpeg", "bmp", "bevy_render"] }
+clap = { version = "4.2.1", features = ["derive"] }
+image = "0.24.6"
 
 [package.metadata.bundle]
 identifier = "io.github.edmbernard.image-viewer-rs"
