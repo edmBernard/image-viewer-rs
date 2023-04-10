@@ -486,7 +486,7 @@ fn on_move_cursor(
             (Box::new(move |index| index * step), cell_size)
         }
         GridLayout::Vertical => {
-            let step = Vec2::new(0., -window.height() / length as f32);
+            let step = Vec2::new(0., window.height() / length as f32);
             let cell_size = Vec2::new(window.width(), step.y.abs());
             (Box::new(move |index| index * step), cell_size)
         }
@@ -497,7 +497,7 @@ fn on_move_cursor(
         GridLayout::Grid => {
             let grid_width = (length as f32).sqrt().ceil();
             let grid_height = (length as f32 / grid_width).ceil();
-            let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
+            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
             let cell_size = step.abs();
             let get_position = move |index| {
                 let row_index = f32::floor(index / grid_width);
