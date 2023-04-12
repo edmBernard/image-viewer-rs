@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::window::{Window, PresentMode, WindowResized};
+use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage};
 use std::f32::consts::{PI, TAU};
@@ -28,6 +28,7 @@ Keyboard Shortcut:
     R: Rotate images
     1, 2, 3, ...: Move Image on top
     Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
+    C: Toggle multi cursor
     H: Toggle this help
 
     Drag and Drop image from files explorer.
@@ -74,6 +75,7 @@ fn main() -> Result<()> {
         .add_system(on_move_image_title)
         .add_system(on_load_image)
         .add_system(toggle_help)
+        .add_system(toggle_cursor)
         .run();
 
     Ok(())
@@ -160,9 +162,6 @@ fn setup(
         delta: Vec2::ZERO,
         pressed: false,
     });
-    let mut window = windows.single_mut();
-    window.cursor.icon = CursorIcon::Crosshair;
-
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
     let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
     let font_handle = fonts.add(font);
@@ -272,24 +271,6 @@ fn on_image_loaded(
             Position(Vec2::ZERO),
             Rotation(0.),
             MyImage,
-        ));
-
-        commands.spawn((
-            TextBundle::from_section(
-                "+",
-                TextStyle {
-                    font: font.0.clone(),
-                    font_size: 28.0,
-                    color: Color::ORANGE_RED,
-                },
-            )
-            .with_text_alignment(TextAlignment::Center)
-            .with_style(Style {
-                position_type: PositionType::Absolute,
-                ..default()
-            }),
-            Id(ev.index),
-            MyCursor,
         ));
 
         let short_path = get_short_name(&ev.path).unwrap_or("");
@@ -469,7 +450,6 @@ fn on_move_image_title(
     }
 }
 
-
 fn on_move_cursor(
     windows: Query<&Window>,
     mut cursor_query: Query<(&Id, &mut Style, &CalculatedSize), With<MyCursor>>,
@@ -493,7 +473,7 @@ fn on_move_cursor(
         GridLayout::Stack => {
             let cell_size = Vec2::new(window.width(), window.height());
             (Box::new(move |_| Vec2::ZERO), cell_size)
-        },
+        }
         GridLayout::Grid => {
             let grid_width = (length as f32).sqrt().ceil();
             let grid_height = (length as f32 / grid_width).ceil();
@@ -514,13 +494,18 @@ fn on_move_cursor(
     for (id, mut style, size) in &mut cursor_query {
         let pos = get_position(id.0 as f32);
         style.position = UiRect {
-            top: Val::Px(pos.y + cell_size.y - f32::rem_euclid(cursor_position.y, cell_size.y) - size.size.y / 2.),
-            left: Val::Px(pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - size.size.x / 2.),
+            top: Val::Px(
+                pos.y + cell_size.y
+                    - f32::rem_euclid(cursor_position.y, cell_size.y)
+                    - size.size.y / 2.,
+            ),
+            left: Val::Px(
+                pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - size.size.x / 2.,
+            ),
             ..default()
         };
     }
 }
-
 
 fn on_resize_system(
     mut resize_evr: EventReader<WindowResized>,
@@ -540,7 +525,13 @@ fn on_reset_visibility(
         let layout = layout_query.single();
         for (i, mut visibility) in &mut visibility_query {
             *visibility = match *layout {
-                GridLayout::Stack => if i.0 == 0 { Visibility::Visible } else { Visibility::Hidden },
+                GridLayout::Stack => {
+                    if i.0 == 0 {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    }
+                }
                 _ => Visibility::Visible,
             }
         }
@@ -632,7 +623,13 @@ fn change_top_image(
     let layout = layout_query.single();
     for (i, mut visibility) in &mut visibility_query {
         *visibility = match layout {
-            GridLayout::Stack => if i.0 == index_on_top - 1 { Visibility::Visible } else { Visibility::Hidden },
+            GridLayout::Stack => {
+                if i.0 == index_on_top - 1 {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                }
+            }
             _ => Visibility::Visible,
         };
     }
@@ -688,7 +685,53 @@ fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With
         *visibility = match *visibility {
             Visibility::Visible => Visibility::Hidden,
             Visibility::Hidden => Visibility::Visible,
-            Visibility::Inherited => Visibility::Inherited
+            Visibility::Inherited => Visibility::Inherited,
+        };
+    }
+}
+
+fn toggle_cursor(
+    keys: Res<Input<KeyCode>>,
+    mut windows: Query<&mut Window>,
+    mut commands: Commands,
+    cursor_query: Query<Entity, With<MyCursor>>,
+    mut image_query: Query<&Id, With<MyImage>>,
+    font_query: Query<&FontHandle>,
+) {
+    if keys.just_pressed(KeyCode::C) {
+        let length = image_query.iter().count();
+        if cursor_query.iter().count() == 0 {
+            let font = font_query.single();
+            for id in &image_query {
+                commands.spawn((
+                    TextBundle::from_section(
+                        "+",
+                        TextStyle {
+                            font: font.0.clone(),
+                            font_size: 28.0,
+                            color: Color::ORANGE_RED,
+                        },
+                    )
+                    .with_text_alignment(TextAlignment::Center)
+                    .with_style(Style {
+                        position_type: PositionType::Absolute,
+                        ..default()
+                    }),
+                    Id(id.0),
+                    MyCursor,
+                ));
+            }
+        } else {
+            for entity in &cursor_query {
+                commands.entity(entity).despawn();
+            }
+        }
+
+        let mut window = windows.single_mut();
+        window.cursor.icon = match window.cursor.icon {
+            CursorIcon::Crosshair => CursorIcon::Default,
+            CursorIcon::Default => CursorIcon::Crosshair,
+            _ => CursorIcon::Default,
         };
     }
 }
@@ -765,8 +808,7 @@ fn file_drop(
     let mut images_filename = Vec::new();
 
     for ev in dnd_evr.iter() {
-        if let FileDragAndDrop::DroppedFile { path_buf, ..} = ev {
-
+        if let FileDragAndDrop::DroppedFile { path_buf, .. } = ev {
             let Some(image_absolute) = path_buf.as_path().to_str() else {
                 println!("Can't resolve given path: {:?}", path_buf);
                 continue;
