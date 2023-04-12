@@ -701,6 +701,8 @@ fn toggle_cursor(
     if keys.just_pressed(KeyCode::C) {
         let length = image_query.iter().count();
         if cursor_query.iter().count() == 0 {
+            let mut window = windows.single_mut();
+            window.cursor.icon = CursorIcon::Crosshair;
             let font = font_query.single();
             for id in &image_query {
                 commands.spawn((
@@ -722,17 +724,12 @@ fn toggle_cursor(
                 ));
             }
         } else {
+            let mut window = windows.single_mut();
+            window.cursor.icon = CursorIcon::Default;
             for entity in &cursor_query {
                 commands.entity(entity).despawn();
             }
         }
-
-        let mut window = windows.single_mut();
-        window.cursor.icon = match window.cursor.icon {
-            CursorIcon::Crosshair => CursorIcon::Default,
-            CursorIcon::Default => CursorIcon::Crosshair,
-            _ => CursorIcon::Default,
-        };
     }
 }
 
