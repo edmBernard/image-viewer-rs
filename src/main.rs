@@ -148,7 +148,6 @@ struct LoadNewImageEvent {
 }
 
 fn setup(
-    mut windows: Query<&mut Window>,
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
@@ -695,11 +694,10 @@ fn toggle_cursor(
     mut windows: Query<&mut Window>,
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
-    mut image_query: Query<&Id, With<MyImage>>,
+    image_query: Query<&Id, With<MyImage>>,
     font_query: Query<&FontHandle>,
 ) {
     if keys.just_pressed(KeyCode::C) {
-        let length = image_query.iter().count();
         if cursor_query.iter().count() == 0 {
             let mut window = windows.single_mut();
             window.cursor.icon = CursorIcon::Crosshair;
