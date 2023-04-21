@@ -668,11 +668,12 @@ fn change_zoom(
     } else {
         return;
     };
+
     for (mut scale, mut position) in &mut query {
         let zoom_factor = (2_f32).powf(scale_factor);
+        position.0 *= zoom_factor / scale.0.x;
         scale.0.x = zoom_factor;
         scale.0.y = zoom_factor;
-        position.0 *= zoom_factor;
     }
 
     move_image_evw.send(MoveImageEvent);
