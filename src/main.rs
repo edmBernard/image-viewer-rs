@@ -45,7 +45,7 @@ fn main() -> Result<()> {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
                         resolution: [500., 300.].into(),
-                        present_mode: PresentMode::AutoVsync,
+                        present_mode: PresentMode::AutoNoVsync,
                         ..default()
                     }),
                     ..default()
@@ -266,7 +266,7 @@ fn on_image_loaded(
                 ..default()
             },
             Id(ev.index),
-            Scale(Vec2::ONE),
+            Scale(Vec2::ONE / 8.),
             Position(Vec2::ZERO),
             Rotation(0.),
             MyImage,

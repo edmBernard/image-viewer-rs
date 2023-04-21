@@ -1,5 +1,7 @@
 /.vscode
 /target
+/assets/icons/v*
+/assets/icons/*.svg
 
 # Data format
 # *.png
