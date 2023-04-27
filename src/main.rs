@@ -4,12 +4,15 @@
 use std::fs::canonicalize;
 use std::path::Path;
 use std::time::{Duration, Instant};
+// use std::io::Cursor;
+use std::io::BufReader;
+use std::fs::File;
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
-use image::{ColorType, DynamicImage};
+use image::{ColorType, DynamicImage, ImageFormat};
 use std::f32::consts::{PI, TAU};
 
 #[doc(hidden)]
@@ -204,9 +207,23 @@ fn on_load_image(
     mut images: ResMut<Assets<Image>>,
 ) {
     for ev in load_evr.iter() {
-        let Ok(image) = image::open(&ev.path) else {
+        let Some(f) = File::open(&ev.path).ok() else {
+            println!("Failed to open file {}", ev.path);
             continue;
         };
+        let Some(format) = ImageFormat::from_path(&ev.path).ok() else {
+            println!("Failed to deduce image format from path");
+            continue;
+        };
+        let buf = BufReader::new(f);
+        let mut reader = image::io::Reader::with_format(buf, format);
+        reader.no_limits();
+
+        let Some(image) = reader.decode().ok() else {
+            println!("Failed to decode image");
+            continue;
+        };
+
         match image.color() {
             ColorType::Rgb8 | ColorType::Rgba8 => {
                 let new_image = Image::from_dynamic(image, true);
