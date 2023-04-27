@@ -4,7 +4,6 @@
 use std::fs::canonicalize;
 use std::path::Path;
 use std::time::{Duration, Instant};
-// use std::io::Cursor;
 use std::io::BufReader;
 use std::fs::File;
 
@@ -215,8 +214,11 @@ fn on_load_image(
             println!("Failed to deduce image format from path");
             continue;
         };
+
         let buf = BufReader::new(f);
         let mut reader = image::io::Reader::with_format(buf, format);
+
+        // Remove the memory limit on image size we can read
         reader.no_limits();
 
         let Some(image) = reader.decode().ok() else {
