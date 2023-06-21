@@ -228,7 +228,7 @@ fn on_load_image(
         };
 
         match image.color() {
-            ColorType::Rgb8 | ColorType::Rgba8 => {
+            ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
                 let new_image = Image::from_dynamic(image, true);
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
