@@ -27,6 +27,7 @@ struct Args {
 const HELP_STRING: &'static str = "
 Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
+    Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
     R: Rotate images
     Shift + 1, 2, 3, ...: Move Image on top
     Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
