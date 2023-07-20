@@ -49,7 +49,7 @@ fn main() -> Result<()> {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
                         resolution: [500., 300.].into(),
-                        present_mode: PresentMode::AutoNoVsync,
+                        present_mode: PresentMode::AutoVsync,
                         ..default()
                     }),
                     ..default()
