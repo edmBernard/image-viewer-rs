@@ -57,29 +57,29 @@ fn main() -> Result<()> {
                 .set(ImagePlugin::default_nearest()),
         )
         .insert_resource(InitialImagesFilename(images_filename))
-        .add_startup_system(setup)
+        .add_systems(Startup, setup)
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
         .add_event::<ResetVisibilityEvent>()
-        .add_system(change_layout)
-        .add_system(change_layout_on_click)
-        .add_system(change_zoom)
-        .add_system(scroll_events)
-        .add_system(mouse_button_input)
-        .add_system(cursor_events)
-        .add_system(file_drop)
-        .add_system(change_top_image)
-        .add_system(change_rotation_image)
-        .add_system(on_reset_visibility)
-        .add_system(on_resize_system)
-        .add_system(on_image_loaded)
-        .add_system(on_move_cursor)
-        .add_system(on_move_image)
-        .add_system(on_move_image_title)
-        .add_system(on_load_image)
-        .add_system(toggle_help)
-        .add_system(toggle_cursor)
+        .add_systems(Update, change_layout)
+        .add_systems(Update, change_layout_on_click)
+        .add_systems(Update, change_zoom)
+        .add_systems(Update, scroll_events)
+        .add_systems(Update, mouse_button_input)
+        .add_systems(Update, cursor_events)
+        .add_systems(Update, file_drop)
+        .add_systems(Update, change_top_image)
+        .add_systems(Update, change_rotation_image)
+        .add_systems(Update, on_reset_visibility)
+        .add_systems(Update, on_resize_system)
+        .add_systems(Update, on_image_loaded)
+        .add_systems(Update, on_move_cursor)
+        .add_systems(Update, on_move_image)
+        .add_systems(Update, on_move_image_title)
+        .add_systems(Update, on_load_image)
+        .add_systems(Update, toggle_help)
+        .add_systems(Update, toggle_cursor)
         .run();
 
     Ok(())
@@ -128,10 +128,13 @@ struct MouseState {
     pressed: bool,
 }
 
+#[derive(Event)]
 struct MoveImageEvent;
 
+#[derive(Event)]
 struct ResetVisibilityEvent;
 
+#[derive(Event)]
 struct NewImageLoadedEvent {
     handle: Handle<Image>,
     path: String,
@@ -145,6 +148,7 @@ struct TotalImageLoaded(i8);
 #[derive(Component)]
 struct FontHandle(Handle<Font>);
 
+#[derive(Event)]
 struct LoadNewImageEvent {
     path: String,
     index: i8,
@@ -182,11 +186,8 @@ fn setup(
         .with_text_alignment(TextAlignment::Left)
         .with_style(Style {
             position_type: PositionType::Absolute,
-            position: UiRect {
-                top: Val::Px(22.),
-                left: Val::Px(5.),
-                ..default()
-            },
+            top: Val::Px(22.),
+            left: Val::Px(5.),
             ..default()
         }),
         MyHelp,
@@ -207,7 +208,7 @@ fn on_load_image(
     mut loaded_evw: EventWriter<NewImageLoadedEvent>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    for ev in load_evr.iter() {
+    for ev in load_evr.read() {
         let Some(f) = File::open(&ev.path).ok() else {
             println!("Failed to open file {}", ev.path);
             continue;
@@ -267,7 +268,7 @@ fn on_image_loaded(
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
 ) {
-    for ev in load_image_evr.iter() {
+    for ev in load_image_evr.read() {
         let mut already_loaded = count_query.single_mut();
         let font = font_query.single();
 
@@ -394,14 +395,12 @@ fn on_move_image(
         let Some(image) = assets.get(image_handle) else {
             continue;
         };
-        let image_size = image.size();
+        let image_size = image.size().as_vec2();
 
         transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
         transform.scale = scale.0.extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
-        let delta = Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta)
-            * Vec2::new(1., -1.)
-            / scale.0;
+        let delta = Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta) / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotate_cell_size = if rotation.0 % 2. == 0. {
             cell_size_layout
@@ -462,17 +461,14 @@ fn on_move_image_title(
 
     for (id, mut style) in &mut text_query {
         let pos = get_position(id.0 as f32);
-        style.position = UiRect {
-            top: Val::Px(pos.y + 2.),
-            left: Val::Px(pos.x + 5.),
-            ..default()
-        };
+        style.top = Val::Px(pos.y + 2.);
+        style.left = Val::Px(pos.x + 5.);
     }
 }
 
 fn on_move_cursor(
     windows: Query<&Window>,
-    mut cursor_query: Query<(&Id, &mut Style, &CalculatedSize), With<MyCursor>>,
+    mut cursor_query: Query<(&Id, &mut Style, &Node), With<MyCursor>>,
     layout_query: Query<&GridLayout>,
 ) {
     let layout = layout_query.single();
@@ -511,19 +507,10 @@ fn on_move_cursor(
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
-    for (id, mut style, size) in &mut cursor_query {
+    for (id, mut style, node) in &mut cursor_query {
         let pos = get_position(id.0 as f32);
-        style.position = UiRect {
-            top: Val::Px(
-                pos.y + cell_size.y
-                    - f32::rem_euclid(cursor_position.y, cell_size.y)
-                    - size.size.y / 2.,
-            ),
-            left: Val::Px(
-                pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - size.size.x / 2.,
-            ),
-            ..default()
-        };
+        style.top = Val::Px(pos.y + f32::rem_euclid(cursor_position.y, cell_size.y) - node.size().y / 2.);
+        style.left = Val::Px(pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - node.size().x / 2.);
     }
 }
 
@@ -531,7 +518,7 @@ fn on_resize_system(
     mut resize_evr: EventReader<WindowResized>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
 ) {
-    for _ in resize_evr.iter() {
+    for _ in resize_evr.read() {
         move_image_evw.send(MoveImageEvent);
     }
 }
@@ -541,7 +528,7 @@ fn on_reset_visibility(
     mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&mut GridLayout>,
 ) {
-    for _ in reset_evr.iter() {
+    for _ in reset_evr.read() {
         let layout = layout_query.single();
         for (i, mut visibility) in &mut visibility_query {
             *visibility = match *layout {
@@ -615,11 +602,11 @@ fn change_top_image(
     mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&GridLayout>,
 ) {
-    let ctrl_pressed = keys.pressed(KeyCode::LControl) || keys.pressed(KeyCode::RControl);
+    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if ctrl_pressed {
         return;
     }
-    let shift_pressed = keys.pressed(KeyCode::LShift) || keys.pressed(KeyCode::RShift);
+    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let index_on_top = if shift_pressed && keys.just_pressed(KeyCode::Key1) {
         1
     } else if shift_pressed && keys.just_pressed(KeyCode::Key2) {
@@ -679,8 +666,8 @@ fn change_zoom(
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut query: Query<(&mut Scale, &mut Position)>,
 ) {
-    let ctrl_pressed = keys.pressed(KeyCode::LControl) || keys.pressed(KeyCode::RControl);
-    let shift_pressed = keys.pressed(KeyCode::LShift) || keys.pressed(KeyCode::RShift);
+    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key1) {
         -1.
     } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key2) {
@@ -774,7 +761,7 @@ fn scroll_events(
     mut query: Query<(&mut Scale, &mut Position)>,
 ) {
     use bevy::input::mouse::MouseScrollUnit;
-    for ev in scroll_evr.iter() {
+    for ev in scroll_evr.read() {
         let scroll = match ev.unit {
             MouseScrollUnit::Line => ev.y,
             MouseScrollUnit::Pixel => ev.y,
@@ -824,7 +811,7 @@ fn cursor_events(
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut mouse_query: Query<&mut MouseState>,
 ) {
-    for ev in cursor_evr.iter() {
+    for ev in cursor_evr.read() {
         let mut mouse_state = mouse_query.single_mut();
         if mouse_state.pressed {
             mouse_state.delta = ev.position - mouse_state.origin;
@@ -839,7 +826,7 @@ fn file_drop(
 ) {
     let mut images_filename = Vec::new();
 
-    for ev in dnd_evr.iter() {
+    for ev in dnd_evr.read() {
         if let FileDragAndDrop::DroppedFile { path_buf, .. } = ev {
             let Some(image_absolute) = path_buf.as_path().to_str() else {
                 println!("Can't resolve given path: {:?}", path_buf);
