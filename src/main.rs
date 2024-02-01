@@ -2,13 +2,14 @@
 #![windows_subsystem = "windows"]
 
 use std::fs::canonicalize;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use std::io::BufReader;
-use std::fs::File;
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::sprite::MaterialMesh2dBundle;
 use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage, ImageFormat};
@@ -400,7 +401,8 @@ fn on_move_image(
         transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
         transform.scale = scale.0.extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
-        let delta = Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta) / scale.0;
+        let delta =
+            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta) / scale.0;
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotate_cell_size = if rotation.0 % 2. == 0. {
             cell_size_layout
@@ -468,7 +470,7 @@ fn on_move_image_title(
 
 fn on_move_cursor(
     windows: Query<&Window>,
-    mut cursor_query: Query<(&Id, &mut Style, &Node), With<MyCursor>>,
+    mut cursor_query: Query<(&Id, &mut Transform), With<MyCursor>>,
     layout_query: Query<&GridLayout>,
 ) {
     let layout = layout_query.single();
@@ -507,10 +509,15 @@ fn on_move_cursor(
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
-    for (id, mut style, node) in &mut cursor_query {
+    for (id, mut transform) in &mut cursor_query {
         let pos = get_position(id.0 as f32);
-        style.top = Val::Px(pos.y + f32::rem_euclid(cursor_position.y, cell_size.y) - node.size().y / 2.);
-        style.left = Val::Px(pos.x + f32::rem_euclid(cursor_position.x, cell_size.x) - node.size().x / 2.);
+        let new_y = pos.y + f32::rem_euclid(cursor_position.y, cell_size.y);
+        let new_x = pos.x + f32::rem_euclid(cursor_position.x, cell_size.x);
+        transform.translation = Vec3::new(
+            -window.width() / 2. + new_x,
+            window.height() / 2. - new_y,
+            transform.translation.z,
+        );
     }
 }
 
@@ -678,7 +685,7 @@ fn change_zoom(
         -4.
     } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key5) {
         -5.
-    } else if  ctrl_pressed && keys.just_pressed(KeyCode::Key1) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key1) {
         0.
     } else if ctrl_pressed && keys.just_pressed(KeyCode::Key2) {
         1.
@@ -719,37 +726,70 @@ fn toggle_cursor(
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
     image_query: Query<&Id, With<MyImage>>,
-    font_query: Query<&FontHandle>,
 ) {
     if keys.just_pressed(KeyCode::C) {
         if cursor_query.iter().count() == 0 {
             let mut window = windows.single_mut();
-            window.cursor.icon = CursorIcon::Crosshair;
-            let font = font_query.single();
+            window.cursor.visible = false;
             for id in &image_query {
-                commands.spawn((
-                    TextBundle::from_section(
-                        "+",
-                        TextStyle {
-                            font: font.0.clone(),
-                            font_size: 28.0,
-                            color: Color::ORANGE_RED,
+                commands
+                    .spawn((
+                        SpatialBundle {
+                            transform: Transform::from_translation(Vec3::new(0., 0., 1.)),
+                            ..default()
                         },
-                    )
-                    .with_text_alignment(TextAlignment::Center)
-                    .with_style(Style {
-                        position_type: PositionType::Absolute,
-                        ..default()
-                    }),
-                    Id(id.0),
-                    MyCursor,
-                ));
+                        Id(id.0),
+                        MyCursor,
+                    ))
+                    .with_children(|parent| {
+                        let cursor_color = Color::rgb(0.75, 0., 0.);
+                        let bar_size = 15.;
+                        let cursor_size = Some(Vec2::new(bar_size, 4.0));
+                        parent.spawn(SpriteBundle {
+                            sprite: Sprite {
+                                color: cursor_color,
+                                custom_size: cursor_size,
+                                ..default()
+                            },
+                            transform: Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
+                                .with_translation(Vec3::new(bar_size, 0., 1.)),
+                            ..default()
+                        });
+                        parent.spawn(SpriteBundle {
+                            sprite: Sprite {
+                                color: cursor_color,
+                                custom_size: cursor_size,
+                                ..default()
+                            },
+                            transform: Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
+                                .with_translation(Vec3::new(-bar_size, 0., 1.)),
+                            ..default()
+                        });
+                        parent.spawn(SpriteBundle {
+                            sprite: Sprite {
+                                color: cursor_color,
+                                custom_size: cursor_size,
+                                ..default()
+                            },
+                            transform: Transform::from_translation(Vec3::new(0., bar_size, 1.)),
+                            ..default()
+                        });
+                        parent.spawn(SpriteBundle {
+                            sprite: Sprite {
+                                color: cursor_color,
+                                custom_size: cursor_size,
+                                ..default()
+                            },
+                            transform: Transform::from_translation(Vec3::new(0., -bar_size, 1.)),
+                            ..default()
+                        });
+                    });
             }
         } else {
             let mut window = windows.single_mut();
-            window.cursor.icon = CursorIcon::Default;
+            window.cursor.visible = true;
             for entity in &cursor_query {
-                commands.entity(entity).despawn();
+                commands.entity(entity).despawn_recursive();
             }
         }
     }
