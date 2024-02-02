@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::sprite::MaterialMesh2dBundle;
 use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
 use image::{ColorType, DynamicImage, ImageFormat};
