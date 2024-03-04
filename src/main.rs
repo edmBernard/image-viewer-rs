@@ -434,38 +434,14 @@ fn on_move_image_title(
     }
     move_image_evr.clear();
 
+    let num_images = text_query.iter().count();
     let layout = layout_query.single();
     let window = windows.single();
-    let length = text_query.iter().count();
-
-    let get_position: Box<dyn Fn(f32) -> Vec2> = match layout {
-        GridLayout::Horizontal => {
-            let step = Vec2::new(window.width() / length as f32, 0.);
-            Box::new(move |index| index * step)
-        }
-        GridLayout::Vertical => {
-            let step = Vec2::new(0., window.height() / length as f32);
-            Box::new(move |index| index * step)
-        }
-        GridLayout::Stack => Box::new(move |_| Vec2::ZERO),
-        GridLayout::Grid => {
-            let grid_width = (length as f32).sqrt().ceil();
-            let grid_height = (length as f32 / grid_width).ceil();
-            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
-
-            let get_position = move |index| {
-                let row_index = f32::floor(index / grid_width);
-                let col_index = f32::rem_euclid(index, grid_width);
-                Vec2::new(col_index, row_index) * step
-            };
-            Box::new(get_position)
-        }
-    };
 
     for (id, mut style) in &mut text_query {
-        let pos = get_position(id.0 as f32);
-        style.top = Val::Px(pos.y + 2.);
-        style.left = Val::Px(pos.x + 5.);
+        let (cell_offset, _) = get_cell_rect(id.0, num_images, layout, window);
+        style.top = Val::Px(cell_offset.y + 2.);
+        style.left = Val::Px(cell_offset.x + 5.);
     }
 }
 
@@ -474,46 +450,17 @@ fn on_move_cursor(
     mut cursor_query: Query<(&Id, &mut Transform), With<MyCursor>>,
     layout_query: Query<&GridLayout>,
 ) {
+    let num_images = cursor_query.iter().count();
     let layout = layout_query.single();
     let window = windows.single();
-    let length = cursor_query.iter().count();
-
-    let (get_position, cell_size): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
-        GridLayout::Horizontal => {
-            let step = Vec2::new(window.width() / length as f32, 0.);
-            let cell_size = Vec2::new(step.x, window.height());
-            (Box::new(move |index| index * step), cell_size)
-        }
-        GridLayout::Vertical => {
-            let step = Vec2::new(0., window.height() / length as f32);
-            let cell_size = Vec2::new(window.width(), step.y.abs());
-            (Box::new(move |index| index * step), cell_size)
-        }
-        GridLayout::Stack => {
-            let cell_size = Vec2::new(window.width(), window.height());
-            (Box::new(move |_| Vec2::ZERO), cell_size)
-        }
-        GridLayout::Grid => {
-            let grid_width = (length as f32).sqrt().ceil();
-            let grid_height = (length as f32 / grid_width).ceil();
-            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
-            let cell_size = step.abs();
-            let get_position = move |index| {
-                let row_index = f32::floor(index / grid_width);
-                let col_index = f32::rem_euclid(index, grid_width);
-                Vec2::new(col_index, row_index) * step
-            };
-            (Box::new(get_position), cell_size)
-        }
-    };
 
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let pos = get_position(id.0 as f32);
-        let new_y = pos.y + f32::rem_euclid(cursor_position.y, cell_size.y);
-        let new_x = pos.x + f32::rem_euclid(cursor_position.x, cell_size.x);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
+        let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
             -window.width() / 2. + new_x,
             window.height() / 2. - new_y,
