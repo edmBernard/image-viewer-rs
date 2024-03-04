@@ -99,7 +99,7 @@ enum GridLayout {
 }
 
 #[derive(Component)]
-struct Id(i8);
+struct Id(usize);
 
 #[derive(Component)]
 struct Scale(Vec2);
@@ -140,12 +140,12 @@ struct ResetVisibilityEvent;
 struct NewImageLoadedEvent {
     handle: Handle<Image>,
     path: String,
-    index: i8,
-    count: i8,
+    index: usize,
+    count: usize,
 }
 
 #[derive(Component)]
-struct TotalImageLoaded(i8);
+struct TotalImageLoaded(usize);
 
 #[derive(Component)]
 struct FontHandle(Handle<Font>);
@@ -153,8 +153,8 @@ struct FontHandle(Handle<Font>);
 #[derive(Event)]
 struct LoadNewImageEvent {
     path: String,
-    index: i8,
-    count: i8,
+    index: usize,
+    count: usize,
 }
 
 fn setup(
@@ -199,8 +199,8 @@ fn setup(
     for (index, image) in images_filename.0.iter().enumerate() {
         load_image_evw.send(LoadNewImageEvent {
             path: image.clone(),
-            index: index as i8,
-            count: count as i8,
+            index: index,
+            count: count,
         });
     }
 }
@@ -723,38 +723,9 @@ fn change_zoom_individually(
             return;
         }
 
+        let num_images = sprite_query.iter().count();
         let layout = layout_query.single();
         let window = windows.single();
-        let length = sprite_query.iter().count();
-
-        let (get_position, cell_size): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
-            GridLayout::Horizontal => {
-                let step = Vec2::new(window.width() / length as f32, 0.);
-                let cell_size = Vec2::new(step.x, window.height());
-                (Box::new(move |index| index * step), cell_size)
-            }
-            GridLayout::Vertical => {
-                let step = Vec2::new(0., window.height() / length as f32);
-                let cell_size = Vec2::new(window.width(), step.y.abs());
-                (Box::new(move |index| index * step), cell_size)
-            }
-            GridLayout::Stack => {
-                let cell_size = Vec2::new(window.width(), window.height());
-                (Box::new(move |_| Vec2::ZERO), cell_size)
-            }
-            GridLayout::Grid => {
-                let grid_width = (length as f32).sqrt().ceil();
-                let grid_height = (length as f32 / grid_width).ceil();
-                let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
-                let cell_size = step.abs();
-                let get_position = move |index| {
-                    let row_index = f32::floor(index / grid_width);
-                    let col_index = f32::rem_euclid(index, grid_width);
-                    Vec2::new(col_index, row_index) * step
-                };
-                (Box::new(get_position), cell_size)
-            }
-        };
 
         let Some(cursor_position) = window.cursor_position() else {
             return;
@@ -767,7 +738,8 @@ fn change_zoom_individually(
 
         let new_position: Option<_> = 'outer: {
             for (id, mut scale, mut position) in &mut sprite_query {
-                let cell_offset = get_position(id.0 as f32);
+                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
                     && cursor_position.y > cell_offset.y
@@ -792,6 +764,35 @@ fn change_zoom_individually(
 
         move_image_evw.send(MoveImageEvent);
     }
+}
+
+fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window) -> (Vec2, Vec2) {
+    let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
+        GridLayout::Horizontal => {
+            let step = Vec2::new(window.width() / num_images as f32, 0.);
+            let cell_size = Vec2::new(step.x, window.height());
+            (index as f32 * step, cell_size)
+        }
+        GridLayout::Vertical => {
+            let step = Vec2::new(0., window.height() / num_images as f32);
+            let cell_size = Vec2::new(window.width(), step.y.abs());
+            (index as f32 * step, cell_size)
+        }
+        GridLayout::Stack => {
+            let cell_size = Vec2::new(window.width(), window.height());
+            (Vec2::ZERO, cell_size)
+        }
+        GridLayout::Grid => {
+            let grid_width = (num_images as f32).sqrt().ceil();
+            let grid_height = (num_images as f32 / grid_width).ceil();
+            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
+            let cell_size = step.abs();
+            let row_index = f32::floor(index as f32 / grid_width);
+            let col_index = f32::rem_euclid(index as f32, grid_width);
+            (Vec2::new(col_index, row_index) * step, cell_size)
+        }
+    };
+    (cell_tl, cell_size)
 }
 
 fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With<MyHelp>>) {
@@ -973,8 +974,8 @@ fn file_drop(
     for (index, filename) in images_filename.into_iter().enumerate() {
         load_image_evw.send(LoadNewImageEvent {
             path: filename,
-            index: index as i8,
-            count: count as i8,
+            index: index,
+            count: count,
         });
     }
 }
