@@ -716,7 +716,7 @@ fn change_zoom_individually(
     buttons: Res<Input<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     layout_query: Query<&GridLayout>,
-    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>
+    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
 ) {
     if keys.pressed(KeyCode::Z) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
@@ -759,19 +759,35 @@ fn change_zoom_individually(
         let Some(cursor_position) = window.cursor_position() else {
             return;
         };
-        for (id, mut scale, mut position) in &mut sprite_query {
-            let cell_offset = get_position(id.0 as f32);
-            if cursor_position.x > cell_offset.x && cursor_position.x < cell_offset.x + cell_size.x && cursor_position.y > cell_offset.y && cursor_position.y < cell_offset.y + cell_size.y {
-                let scale_factor = if buttons.just_pressed(MouseButton::Left) {
-                    2.0_f32
-                } else {
-                    0.5_f32
-                };
-                let zoom_factor = scale.0.x / scale_factor;
-                position.0 *= zoom_factor / scale.0.x;
-                scale.0.x = zoom_factor;
-                scale.0.y = zoom_factor;
+        let scale_factor = if buttons.just_pressed(MouseButton::Left) {
+            2.0f32
+        } else {
+            0.5f32
+        };
+
+        let new_position: Option<_> = 'outer: {
+            for (id, mut scale, mut position) in &mut sprite_query {
+                let cell_offset = get_position(id.0 as f32);
+                if cursor_position.x > cell_offset.x
+                    && cursor_position.x < cell_offset.x + cell_size.x
+                    && cursor_position.y > cell_offset.y
+                    && cursor_position.y < cell_offset.y + cell_size.y
+                {
+                    let zoom_factor = scale.0.x / scale_factor;
+                    position.0 *= zoom_factor / scale.0.x;
+                    scale.0.x = zoom_factor;
+                    scale.0.y = zoom_factor;
+                    break 'outer Some(position.0);
+                }
+            };
+            None
+        };
+        // We apply the same position on each image
+        if let Some(pos) = new_position {
+            for (_id, _scale, mut position) in &mut sprite_query {
+                position.0 = pos;
             }
+
         }
 
         move_image_evw.send(MoveImageEvent);
