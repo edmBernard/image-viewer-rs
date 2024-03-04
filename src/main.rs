@@ -32,6 +32,7 @@ Keyboard Shortcut:
     Shift + 1, 2, 3, ...: Move Image on top
     Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
     Ctrl/Cmd + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
+    Z + Right/Left clic: zoom in/out the hovered image only
     C: Toggle multi cursor
     H: Toggle this help
 
@@ -65,6 +66,7 @@ fn main() -> Result<()> {
         .add_systems(Update, change_layout)
         .add_systems(Update, change_layout_on_click)
         .add_systems(Update, change_zoom)
+        .add_systems(Update, change_zoom_individually)
         .add_systems(Update, scroll_events)
         .add_systems(Update, mouse_button_input)
         .add_systems(Update, cursor_events)
@@ -708,6 +710,74 @@ fn change_zoom(
     move_image_evw.send(MoveImageEvent);
 }
 
+fn change_zoom_individually(
+    windows: Query<&Window>,
+    keys: Res<Input<KeyCode>>,
+    buttons: Res<Input<MouseButton>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    layout_query: Query<&GridLayout>,
+    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>
+) {
+    if keys.pressed(KeyCode::Z) {
+        if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
+            return;
+        }
+
+        let layout = layout_query.single();
+        let window = windows.single();
+        let length = sprite_query.iter().count();
+
+        let (get_position, cell_size): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
+            GridLayout::Horizontal => {
+                let step = Vec2::new(window.width() / length as f32, 0.);
+                let cell_size = Vec2::new(step.x, window.height());
+                (Box::new(move |index| index * step), cell_size)
+            }
+            GridLayout::Vertical => {
+                let step = Vec2::new(0., window.height() / length as f32);
+                let cell_size = Vec2::new(window.width(), step.y.abs());
+                (Box::new(move |index| index * step), cell_size)
+            }
+            GridLayout::Stack => {
+                let cell_size = Vec2::new(window.width(), window.height());
+                (Box::new(move |_| Vec2::ZERO), cell_size)
+            }
+            GridLayout::Grid => {
+                let grid_width = (length as f32).sqrt().ceil();
+                let grid_height = (length as f32 / grid_width).ceil();
+                let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
+                let cell_size = step.abs();
+                let get_position = move |index| {
+                    let row_index = f32::floor(index / grid_width);
+                    let col_index = f32::rem_euclid(index, grid_width);
+                    Vec2::new(col_index, row_index) * step
+                };
+                (Box::new(get_position), cell_size)
+            }
+        };
+
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+        for (id, mut scale, mut position) in &mut sprite_query {
+            let cell_offset = get_position(id.0 as f32);
+            if cursor_position.x > cell_offset.x && cursor_position.x < cell_offset.x + cell_size.x && cursor_position.y > cell_offset.y && cursor_position.y < cell_offset.y + cell_size.y {
+                let scale_factor = if buttons.just_pressed(MouseButton::Left) {
+                    2.0_f32
+                } else {
+                    0.5_f32
+                };
+                let zoom_factor = scale.0.x / scale_factor;
+                position.0 *= zoom_factor / scale.0.x;
+                scale.0.x = zoom_factor;
+                scale.0.y = zoom_factor;
+            }
+        }
+
+        move_image_evw.send(MoveImageEvent);
+    }
+}
+
 fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With<MyHelp>>) {
     if keys.just_pressed(KeyCode::H) {
         let mut visibility = query.single_mut();
@@ -822,6 +892,15 @@ fn mouse_button_input(
     mut mouse_query: Query<&mut MouseState>,
     mut position_query: Query<&mut Position>,
 ) {
+    if buttons.just_pressed(MouseButton::Left) {
+        let window = windows.single();
+        if let Some(cursor_position) = window.cursor_position() {
+            let mut mouse_state = mouse_query.single_mut();
+            mouse_state.pressed = true;
+            mouse_state.origin = cursor_position;
+            mouse_state.delta = Vec2::ZERO;
+        }
+    }
     if buttons.just_pressed(MouseButton::Left) {
         let window = windows.single();
         if let Some(cursor_position) = window.cursor_position() {
