@@ -349,18 +349,18 @@ fn on_move_image(
     let layout = layout_query.single();
     let mouse = mouse_query.single();
     let window = windows.single();
-    let length = sprite_position.iter().count();
+    let num_images = sprite_position.iter().count();
 
     let (get_position, cell_size_layout): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
         GridLayout::Horizontal => {
-            let step = Vec2::new(window.width() / length as f32, 0.);
+            let step = Vec2::new(window.width() / num_images as f32, 0.);
             let offset = Vec2::new(-window.width() / 2. + step.x / 2., 0.);
             let cell_size = Vec2::new(step.x, window.height());
             let get_position = move |index| index * step + offset;
             (Box::new(get_position), cell_size)
         }
         GridLayout::Vertical => {
-            let step = Vec2::new(0., -window.height() / length as f32);
+            let step = Vec2::new(0., -window.height() / num_images as f32);
             let offset = Vec2::new(0., window.height() / 2. + step.y / 2.);
             let cell_size = Vec2::new(window.width(), step.y.abs());
             let get_position = move |index| index * step + offset;
@@ -374,8 +374,8 @@ fn on_move_image(
             (Box::new(get_position), cell_size)
         }
         GridLayout::Grid => {
-            let grid_width = (length as f32).sqrt().ceil();
-            let grid_height = (length as f32 / grid_width).ceil();
+            let grid_width = (num_images as f32).sqrt().ceil();
+            let grid_height = (num_images as f32 / grid_width).ceil();
             let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
             let offset = Vec2::new(
                 -window.width() / 2. + step.x / 2.,
@@ -398,7 +398,6 @@ fn on_move_image(
             continue;
         };
         let image_size = image.size().as_vec2();
-
         transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
         transform.scale = scale.0.extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
