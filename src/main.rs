@@ -49,7 +49,7 @@ fn main() -> Result<()> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
-                        resolution: [500., 300.].into(),
+                        resolution: [600., 300.].into(),
                         present_mode: PresentMode::AutoVsync,
                         ..default()
                     }),
@@ -273,6 +273,7 @@ fn on_image_loaded(
     mut count_query: Query<&mut TotalImageLoaded>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
+    layout_query: Query<&GridLayout>,
 ) {
     for ev in load_image_evr.read() {
         let mut already_loaded = count_query.single_mut();
@@ -287,10 +288,16 @@ fn on_image_loaded(
         if already_loaded.0 >= ev.count {
             already_loaded.0 = 0;
         }
+        let layout = layout_query.single();
+        let visibility = match layout {
+            GridLayout::Stack => if already_loaded.0 != 0 { Visibility::Hidden } else { Visibility::Visible }
+            _ => Visibility::Visible
+        };
 
         commands.spawn((
             SpriteBundle {
                 texture: ev.handle.clone(),
+                visibility,
                 ..default()
             },
             Id(ev.index),
@@ -302,22 +309,27 @@ fn on_image_loaded(
 
         let short_path = get_short_name(&ev.path).unwrap_or("");
         commands.spawn((
-            TextBundle::from_section(
+            TextBundle {
+                text: Text::from_section(
                 short_path,
                 TextStyle {
                     font: font.0.clone(),
                     font_size: 16.0,
                     color: Color::GREEN,
                 },
-            )
-            .with_text_alignment(TextAlignment::Left)
-            .with_style(Style {
-                position_type: PositionType::Absolute,
+                ),
+                visibility,
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    ..default()
+                },
                 ..default()
-            }),
+            }
+            .with_text_alignment(TextAlignment::Left),
             Id(ev.index),
             MyText,
         ));
+
         reset_vis_evw.send(ResetVisibilityEvent);
         move_image_evw.send(MoveImageEvent);
 
