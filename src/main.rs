@@ -357,6 +357,7 @@ fn on_move_image(
     global_scale_query: Query<&GlobalScale>,
     layout_query: Query<&GridLayout>,
     mouse_query: Query<&MouseState>,
+    mut title_query: Query<&mut Style, With<MyText>>,
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -402,6 +403,11 @@ fn on_move_image(
         );
 
         sprite.rect = Some(cell.intersect(image_crop));
+    }
+
+    let (_, cell_size) = get_cell_rect(0, num_images, layout, window);
+    for mut style in &mut title_query {
+        style.width = Val::Px(cell_size.x);
     }
 }
 
