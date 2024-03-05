@@ -630,7 +630,7 @@ fn change_zoom_individually(
     buttons: Res<Input<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     layout_query: Query<&GridLayout>,
-    mut sprite_query: Query<(&Id, &mut Scale), With<MyImage>>,
+    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
 ) {
     if keys.pressed(KeyCode::Z) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
@@ -650,16 +650,26 @@ fn change_zoom_individually(
             0.5f32
         };
 
-        for (id, mut scale) in &mut sprite_query {
-            let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        let position_normalized = 'outer: {
+            for (id, mut scale, position) in &mut sprite_query {
+                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
 
-            if cursor_position.x > cell_offset.x
-                && cursor_position.x < cell_offset.x + cell_size.x
-                && cursor_position.y > cell_offset.y
-                && cursor_position.y < cell_offset.y + cell_size.y
-            {
-                scale.0 *= scale_factor;
-                break;
+                if cursor_position.x > cell_offset.x
+                    && cursor_position.x < cell_offset.x + cell_size.x
+                    && cursor_position.y > cell_offset.y
+                    && cursor_position.y < cell_offset.y + cell_size.y
+                {
+                    scale.0 *= scale_factor;
+                    break 'outer Some(position.0 * scale.0);
+                }
+            }
+            None
+        };
+
+        if let Some(pos) = position_normalized {
+            // Reset position for other images to match the one we zoom
+            for (_id, scale, mut position) in &mut sprite_query {
+                position.0 = pos / scale.0;
             }
         }
 
