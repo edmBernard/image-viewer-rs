@@ -65,7 +65,7 @@ fn main() -> Result<()> {
         .add_event::<ResetVisibilityEvent>()
         .add_systems(Update, change_layout)
         .add_systems(Update, change_layout_on_click)
-        .add_systems(Update, change_zoom)
+        .add_systems(Update, change_global_zoom)
         .add_systems(Update, change_zoom_individually)
         .add_systems(Update, scroll_events)
         .add_systems(Update, mouse_button_input)
@@ -102,7 +102,10 @@ enum GridLayout {
 struct Id(usize);
 
 #[derive(Component)]
-struct Scale(Vec2);
+struct GlobalScale(f32);
+
+#[derive(Component)]
+struct Scale(f32);
 
 #[derive(Component)]
 struct Position(Vec2);
@@ -165,6 +168,7 @@ fn setup(
 ) {
     commands.spawn(Camera2dBundle::default());
     commands.spawn(GridLayout::Grid);
+    commands.spawn(GlobalScale(1. / 8.));
     commands.spawn(TotalImageLoaded(0));
     commands.spawn(MouseState {
         origin: Vec2::ZERO,
@@ -290,7 +294,7 @@ fn on_image_loaded(
                 ..default()
             },
             Id(ev.index),
-            Scale(Vec2::ONE / 8.),
+            Scale(1.),
             Position(Vec2::ZERO),
             Rotation(0.),
             MyImage,
@@ -338,6 +342,7 @@ fn on_move_image(
         ),
         With<MyImage>,
     >,
+    global_scale_query: Query<&GlobalScale>,
     layout_query: Query<&GridLayout>,
     mouse_query: Query<&MouseState>,
 ) {
@@ -350,46 +355,7 @@ fn on_move_image(
     let mouse = mouse_query.single();
     let window = windows.single();
     let num_images = sprite_position.iter().count();
-
-    let (get_position, cell_size_layout): (Box<dyn Fn(f32) -> Vec2>, Vec2) = match layout {
-        GridLayout::Horizontal => {
-            let step = Vec2::new(window.width() / num_images as f32, 0.);
-            let offset = Vec2::new(-window.width() / 2. + step.x / 2., 0.);
-            let cell_size = Vec2::new(step.x, window.height());
-            let get_position = move |index| index * step + offset;
-            (Box::new(get_position), cell_size)
-        }
-        GridLayout::Vertical => {
-            let step = Vec2::new(0., -window.height() / num_images as f32);
-            let offset = Vec2::new(0., window.height() / 2. + step.y / 2.);
-            let cell_size = Vec2::new(window.width(), step.y.abs());
-            let get_position = move |index| index * step + offset;
-            (Box::new(get_position), cell_size)
-        }
-        GridLayout::Stack => {
-            let step = Vec2::new(0., 0.);
-            let offset = Vec2::new(0., 0.);
-            let cell_size = Vec2::new(window.width(), window.height());
-            let get_position = move |index| index * step + offset;
-            (Box::new(get_position), cell_size)
-        }
-        GridLayout::Grid => {
-            let grid_width = (num_images as f32).sqrt().ceil();
-            let grid_height = (num_images as f32 / grid_width).ceil();
-            let step = Vec2::new(window.width() / grid_width, -window.height() / grid_height);
-            let offset = Vec2::new(
-                -window.width() / 2. + step.x / 2.,
-                window.height() / 2. + step.y / 2.,
-            );
-            let cell_size = step.abs();
-            let get_position = move |index| {
-                let row_index = f32::floor(index / grid_width);
-                let col_index = f32::rem_euclid(index, grid_width);
-                Vec2::new(col_index, row_index) * step + offset
-            };
-            (Box::new(get_position), cell_size)
-        }
-    };
+    let global_scale = global_scale_query.single();
 
     for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in
         &mut sprite_position
@@ -398,24 +364,29 @@ fn on_move_image(
             continue;
         };
         let image_size = image.size().as_vec2();
-        transform.translation = get_position(id.0 as f32).extend(transform.translation.z);
-        transform.scale = scale.0.extend(1.);
+
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        transform.translation =
+            (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
+                .extend(transform.translation.z) * Vec3::new(1., -1., 1.);
+        transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
+
         let delta =
-            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta) / scale.0;
+            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
-        let rotate_cell_size = if rotation.0 % 2. == 0. {
-            cell_size_layout
+        let rotated_cell_size = if rotation.0 % 2. == 0. {
+            cell_size
         } else {
-            Vec2::new(cell_size_layout.y, cell_size_layout.x)
+            Vec2::new(cell_size.y, cell_size.x)
         };
         let cell_center_area = Rect::from_center_size(
             image_size / 2.,
-            (image_size - rotate_cell_size / scale.0).max(Vec2::ONE),
+            (image_size - rotated_cell_size / (scale.0 * global_scale.0)).max(Vec2::ONE),
         );
         let cell = Rect::from_center_size(
             bound(image_size / 2. - delta, cell_center_area),
-            (rotate_cell_size - 2.) / scale.0,
+            (rotated_cell_size - 2.) / (scale.0 * global_scale.0),
         );
 
         sprite.rect = Some(cell.intersect(image_crop));
@@ -615,11 +586,12 @@ fn change_rotation_image(
     move_image_evw.send(MoveImageEvent);
 }
 
-fn change_zoom(
+fn change_global_zoom(
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut query: Query<(&mut Scale, &mut Position)>,
+    mut global_scale: Query<&mut GlobalScale>,
 ) {
+    let mut global_scale = global_scale.single_mut();
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key1) {
@@ -646,12 +618,8 @@ fn change_zoom(
         return;
     };
 
-    for (mut scale, mut position) in &mut query {
-        let zoom_factor = (2_f32).powf(scale_factor);
-        position.0 *= zoom_factor / scale.0.x;
-        scale.0.x = zoom_factor;
-        scale.0.y = zoom_factor;
-    }
+    let zoom_factor = (2_f32).powf(scale_factor);
+    global_scale.0 = zoom_factor;
 
     move_image_evw.send(MoveImageEvent);
 }
@@ -662,7 +630,7 @@ fn change_zoom_individually(
     buttons: Res<Input<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     layout_query: Query<&GridLayout>,
-    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
+    mut sprite_query: Query<(&Id, &mut Scale), With<MyImage>>,
 ) {
     if keys.pressed(KeyCode::Z) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
@@ -682,37 +650,29 @@ fn change_zoom_individually(
             0.5f32
         };
 
-        let new_position: Option<_> = 'outer: {
-            for (id, mut scale, mut position) in &mut sprite_query {
-                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        for (id, mut scale) in &mut sprite_query {
+            let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
 
-                if cursor_position.x > cell_offset.x
-                    && cursor_position.x < cell_offset.x + cell_size.x
-                    && cursor_position.y > cell_offset.y
-                    && cursor_position.y < cell_offset.y + cell_size.y
-                {
-                    let zoom_factor = scale.0.x / scale_factor;
-                    position.0 *= zoom_factor / scale.0.x;
-                    scale.0.x = zoom_factor;
-                    scale.0.y = zoom_factor;
-                    break 'outer Some(position.0);
-                }
-            };
-            None
-        };
-        // We apply the same position on each image
-        if let Some(pos) = new_position {
-            for (_id, _scale, mut position) in &mut sprite_query {
-                position.0 = pos;
+            if cursor_position.x > cell_offset.x
+                && cursor_position.x < cell_offset.x + cell_size.x
+                && cursor_position.y > cell_offset.y
+                && cursor_position.y < cell_offset.y + cell_size.y
+            {
+                scale.0 *= scale_factor;
+                break;
             }
-
         }
 
         move_image_evw.send(MoveImageEvent);
     }
 }
 
-fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window) -> (Vec2, Vec2) {
+fn get_cell_rect(
+    index: usize,
+    num_images: usize,
+    layout: &GridLayout,
+    window: &Window,
+) -> (Vec2, Vec2) {
     let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / num_images as f32, 0.);
@@ -830,8 +790,9 @@ fn toggle_cursor(
 fn scroll_events(
     mut scroll_evr: EventReader<MouseWheel>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut query: Query<(&mut Scale, &mut Position)>,
+    mut global_scale_query: Query<&mut GlobalScale>,
 ) {
+    let mut global_scale = global_scale_query.single_mut();
     use bevy::input::mouse::MouseScrollUnit;
     for ev in scroll_evr.read() {
         let scroll = match ev.unit {
@@ -839,12 +800,9 @@ fn scroll_events(
             MouseScrollUnit::Pixel => ev.y,
         };
 
-        for (mut scale, mut position) in &mut query {
-            let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
-            scale.0.x *= zoom_factor;
-            scale.0.y *= zoom_factor;
-            position.0 *= zoom_factor;
-        }
+        let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
+        global_scale.0 *= zoom_factor;
+
         move_image_evw.send(MoveImageEvent);
     }
 }
@@ -853,37 +811,33 @@ fn mouse_button_input(
     buttons: Res<Input<MouseButton>>,
     windows: Query<&Window>,
     mut mouse_query: Query<&mut MouseState>,
-    mut position_query: Query<&mut Position>,
+    global_scale_query: Query<&GlobalScale>,
+    mut image_query: Query<(&mut Position, &Scale), With<MyImage>>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {
         let window = windows.single();
-        if let Some(cursor_position) = window.cursor_position() {
-            let mut mouse_state = mouse_query.single_mut();
-            mouse_state.pressed = true;
-            mouse_state.origin = cursor_position;
-            mouse_state.delta = Vec2::ZERO;
-        }
-    }
-    if buttons.just_pressed(MouseButton::Left) {
-        let window = windows.single();
-        if let Some(cursor_position) = window.cursor_position() {
-            let mut mouse_state = mouse_query.single_mut();
-            mouse_state.pressed = true;
-            mouse_state.origin = cursor_position;
-            mouse_state.delta = Vec2::ZERO;
-        }
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+        let mut mouse_state = mouse_query.single_mut();
+        mouse_state.pressed = true;
+        mouse_state.origin = cursor_position;
+        mouse_state.delta = Vec2::ZERO;
     }
     if buttons.just_released(MouseButton::Left) {
         let window = windows.single();
-        if let Some(cursor_position) = window.cursor_position() {
-            let mut mouse_state = mouse_query.single_mut();
-            mouse_state.pressed = false;
-            for mut position in &mut position_query {
-                position.0 += cursor_position - mouse_state.origin;
-            }
-            mouse_state.origin = cursor_position;
-            mouse_state.delta = Vec2::ZERO;
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+        let global_scale = global_scale_query.single();
+        let mut mouse_state = mouse_query.single_mut();
+
+        mouse_state.pressed = false;
+        for (mut position, scale) in &mut image_query {
+            position.0 += (cursor_position - mouse_state.origin) / (scale.0 * global_scale.0);
         }
+        mouse_state.origin = cursor_position;
+        mouse_state.delta = Vec2::ZERO;
     }
 }
 
