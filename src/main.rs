@@ -69,7 +69,7 @@ fn main() -> Result<()> {
         .add_systems(Update, change_zoom_individually)
         .add_systems(Update, scroll_events)
         .add_systems(Update, mouse_button_input)
-        .add_systems(Update, cursor_events)
+        .add_systems(Update, cursor_move)
         .add_systems(Update, file_drop)
         .add_systems(Update, change_top_image)
         .add_systems(Update, change_rotation_image)
@@ -819,29 +819,38 @@ fn mouse_button_input(
         let Some(cursor_position) = window.cursor_position() else {
             return;
         };
-        let mut mouse_state = mouse_query.single_mut();
-        mouse_state.pressed = true;
-        mouse_state.origin = cursor_position;
-        mouse_state.delta = Vec2::ZERO;
+        let mut mouse = mouse_query.single_mut();
+        mouse.pressed = true;
+        mouse.origin = cursor_position;
+        mouse.delta = Vec2::ZERO;
     }
     if buttons.just_released(MouseButton::Left) {
+        let mut mouse = mouse_query.single_mut();
+        let global_scale = global_scale_query.single();
+        mouse.pressed = false;
+
         let window = windows.single();
+
         let Some(cursor_position) = window.cursor_position() else {
+            // Cursor is outside of the windows
+            for (mut position, scale) in &mut image_query {
+                position.0 += mouse.delta / (scale.0 * global_scale.0);
+                let delta = mouse.delta;
+                mouse.origin += delta / (scale.0 * global_scale.0);
+            }
+            mouse.delta = Vec2::ZERO;
             return;
         };
-        let global_scale = global_scale_query.single();
-        let mut mouse_state = mouse_query.single_mut();
 
-        mouse_state.pressed = false;
         for (mut position, scale) in &mut image_query {
-            position.0 += (cursor_position - mouse_state.origin) / (scale.0 * global_scale.0);
+            position.0 += (cursor_position - mouse.origin) / (scale.0 * global_scale.0);
         }
-        mouse_state.origin = cursor_position;
-        mouse_state.delta = Vec2::ZERO;
+        mouse.origin = cursor_position;
+        mouse.delta = Vec2::ZERO;
     }
 }
 
-fn cursor_events(
+fn cursor_move(
     mut cursor_evr: EventReader<CursorMoved>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut mouse_query: Query<&mut MouseState>,
