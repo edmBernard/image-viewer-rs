@@ -3,7 +3,6 @@
 
 use std::fs::canonicalize;
 use std::fs::File;
-use std::io::BufRead;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::Path;
@@ -12,7 +11,6 @@ use std::time::{Duration, Instant};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, Window, WindowResized};
-use bevy::asset::Handle::{Strong, Weak};
 use clap::Parser;
 use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use std::f32::consts::{PI, TAU};
