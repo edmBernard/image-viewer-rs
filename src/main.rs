@@ -35,6 +35,7 @@ Keyboard Shortcut:
     Ctrl/Cmd + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
     Z + Right/Left clic: zoom in/out the hovered image only
     C: Toggle multi cursor
+    P: Save image to disk with the displayed crop (prefixed by cr_)
     H: Toggle this help
 
     Drag and Drop image from files explorer.
