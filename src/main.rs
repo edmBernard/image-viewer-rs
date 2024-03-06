@@ -3,15 +3,18 @@
 
 use std::fs::canonicalize;
 use std::fs::File;
+use std::io::BufRead;
 use std::io::BufReader;
+use std::io::BufWriter;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, Window, WindowResized};
+use bevy::asset::Handle::{Strong, Weak};
 use clap::Parser;
-use image::{ColorType, DynamicImage, ImageFormat};
+use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use std::f32::consts::{PI, TAU};
 
 #[doc(hidden)]
@@ -82,6 +85,7 @@ fn main() -> Result<()> {
         .add_systems(Update, on_load_image)
         .add_systems(Update, toggle_help)
         .add_systems(Update, toggle_cursor)
+        .add_systems(Update, save_cropped)
         .run();
 
     Ok(())
@@ -113,6 +117,9 @@ struct Position(Vec2);
 /// Rotation in quarter turn (1 is 1 turn)
 #[derive(Component)]
 struct Rotation(f32);
+
+#[derive(Component)]
+struct ImagePath(String);
 
 #[derive(Component)]
 struct MyCursor;
@@ -304,6 +311,7 @@ fn on_image_loaded(
             Scale(1.),
             Position(Vec2::ZERO),
             Rotation(0.),
+            ImagePath(ev.path.clone()),
             MyImage,
         ));
 
@@ -811,6 +819,72 @@ fn toggle_cursor(
             for entity in &cursor_query {
                 commands.entity(entity).despawn_recursive();
             }
+        }
+    }
+}
+
+fn save_cropped(
+    keys: Res<Input<KeyCode>>,
+    image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
+) {
+    if keys.just_pressed(KeyCode::P) {
+        for (path, sprite) in &image_query {
+            // Get Input image
+            let input_path = Path::new(&path.0);
+            let Some(f_in) = File::open(&input_path).ok() else {
+                println!("Failed to open file {}", path.0);
+                continue;
+            };
+            let buf_in = BufReader::new(f_in);
+            let Some(format) = ImageFormat::from_path(&input_path).ok() else {
+                println!("Failed to deduce image format from path : {}", path.0);
+                continue;
+            };
+
+            let mut reader = image::io::Reader::with_format(buf_in, format);
+
+            // Remove the memory limit on image size we can read
+            reader.no_limits();
+
+            let Some(image) = reader.decode().ok() else {
+                println!("Failed to decode image");
+                continue;
+            };
+
+            // Get Output buffer
+            let Some(parent) = input_path.parent() else {
+                continue;
+            };
+            let Some(filename) = input_path.file_name() else {
+                continue;
+            };
+            let Some(filename_as_str) = filename.to_str() else {
+                continue;
+            };
+            let output_path = parent.join(String::from("cr_") + filename_as_str);
+
+            let Some(f_out) = File::create(&output_path).ok() else {
+                println!("Failed to create file {}", &output_path.display());
+                continue;
+            };
+            let mut buf_out = BufWriter::new(f_out);
+
+            // Get Roi from sprite
+            let Some(rect) = sprite.rect else {
+                println!("Failed to get ROI of the texture");
+                continue;
+            };
+
+            let size = rect.max - rect.min;
+            let image_view = SubImage::new(&image, rect.min.x as u32, rect.min.y as u32, size.x as u32, size.y as u32);
+
+            let subimage = image_view.to_image();
+
+            // Save to disk
+            let Some(_) = subimage.write_to(&mut buf_out, ImageFormat::Jpeg).ok() else {
+                println!("Failed to write data to file {}", &output_path.display());
+                continue;
+            };
         }
     }
 }
