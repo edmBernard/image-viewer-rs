@@ -1,13 +1,24 @@
 [shortcut]
+# Shortcut to save crop image shown on screen
 save_crop_image = "P"
+# Shortcut to toggle the multicursor
 local_zoom_modifier = "Z"
+# Shortcut to toggle the multicursor
 switch_cursor = "C"
+# Shortcut to switch between layout (grid, stack; horizontal ...)
 switch_layout = "L"
+# Shortcut to rotate all images
 rotate_images = "R"
 
 [text]
+# Color of the image name shown in the corner
 font_color = { "Rgba"= { "red"= 0.0, "green"= 1.0, "blue"= 0.0, "alpha"= 1.0}}
+# Font size of the image name
 font_size = 16.0
 
 [hdr]
 enabled = false
+
+[misc]
+# Enable the zoom on mouse scroll
+enable_zoom_on_scroll = true

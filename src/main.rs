@@ -59,15 +59,21 @@ struct ConfigText {
 }
 
 #[derive(Deserialize, Debug)]
-struct HDR {
+struct ConfigHDR {
     enabled: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct ConfigMisc {
+    enable_zoom_on_scroll: bool,
 }
 
 #[derive(Deserialize, Debug, Resource)]
 struct Config {
     text: ConfigText,
     shortcut: ConfigShortcut,
-    hdr: HDR,
+    hdr: ConfigHDR,
+    misc: ConfigMisc,
 }
 
 fn main() -> Result<()> {
@@ -997,22 +1003,25 @@ fn save_cropped(
 }
 
 fn scroll_events(
+    config: Res<Config>,
     mut scroll_evr: EventReader<MouseWheel>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut global_scale_query: Query<&mut GlobalScale>,
 ) {
-    let mut global_scale = global_scale_query.single_mut();
-    use bevy::input::mouse::MouseScrollUnit;
-    for ev in scroll_evr.read() {
-        let scroll = match ev.unit {
-            MouseScrollUnit::Line => ev.y,
-            MouseScrollUnit::Pixel => ev.y,
-        };
+    if config.misc.enable_zoom_on_scroll {
+        let mut global_scale = global_scale_query.single_mut();
+        use bevy::input::mouse::MouseScrollUnit;
+        for ev in scroll_evr.read() {
+            let scroll = match ev.unit {
+                MouseScrollUnit::Line => ev.y,
+                MouseScrollUnit::Pixel => ev.y,
+            };
 
-        let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
-        global_scale.0 *= zoom_factor;
+            let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
+            global_scale.0 *= zoom_factor;
 
-        move_image_evw.send(MoveImageEvent);
+            move_image_evw.send(MoveImageEvent);
+        }
     }
 }
 
