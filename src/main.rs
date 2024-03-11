@@ -9,13 +9,12 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
 use home;
-use image::{ColorType, ImageFormat, DynamicImage, SubImage};
+use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::Deserialize;
 
 #[doc(hidden)]
@@ -60,10 +59,15 @@ struct ConfigText {
 }
 
 #[derive(Deserialize, Debug)]
-#[derive(Resource)]
+struct HDR {
+    enabled: bool,
+}
+
+#[derive(Deserialize, Debug, Resource)]
 struct Config {
     text: ConfigText,
     shortcut: ConfigShortcut,
+    hdr: HDR,
 }
 
 fn main() -> Result<()> {
@@ -79,8 +83,12 @@ fn main() -> Result<()> {
         let config_filename = ".image_viewer";
         println!("{}", home_directory.join(config_filename).display());
 
-        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok() else {
-            println!("Config File not found: {}", home_directory.join(config_filename).display());
+        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok()
+        else {
+            println!(
+                "Config File not found: {}",
+                home_directory.join(config_filename).display()
+            );
             break 'block None;
         };
 
@@ -228,18 +236,18 @@ struct LoadNewImageEvent {
 fn setup(
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
+    config: Res<Config>,
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
     mut fonts: ResMut<Assets<Font>>,
 ) {
     commands.spawn(Camera2dBundle {
         camera: Camera {
-            hdr: true,
+            hdr: config.hdr.enabled,
             ..default()
         },
-        tonemapping: Tonemapping::None,
+        // tonemapping: Tonemapping::TonyMcMapface
         ..default()
     });
-    // commands.spawn(Camera2dBundle::default());
 
     commands.spawn(GridLayout::Grid);
     commands.spawn(GlobalScale(1. / 8.));
@@ -332,7 +340,6 @@ fn on_load_image(
             }
             ColorType::L16 => {
                 let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
-                // let new_image = Image::from_dynamic(image_8u, true);
                 let new_image = Image::from_dynamic(image_rgb16, true);
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
@@ -343,7 +350,10 @@ fn on_load_image(
                 });
             }
             _ => {
-                println!("Unsupported image type : image.color(): {:?}", image.color())
+                println!(
+                    "Unsupported image type : image.color(): {:?}",
+                    image.color()
+                )
             }
         }
     }
