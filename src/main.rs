@@ -44,9 +44,64 @@ Keyboard Shortcut:
     Drag and Drop image from files explorer.
 ";
 
+#[derive(Deserialize, Debug)]
+struct ConfigShortcut {
+    save_crop_image: KeyCode,
+    local_zoom_modifier: KeyCode,
+    switch_cursor: KeyCode,
+    switch_layout: KeyCode,
+    rotate_images: KeyCode,
+}
+
+#[derive(Deserialize, Debug)]
+struct ConfigText {
+    font_size: f32,
+    font_color: Color,
+}
+
+#[derive(Deserialize, Debug)]
+#[derive(Resource)]
+struct Config {
+    text: ConfigText,
+    shortcut: ConfigShortcut,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let images_filename = check_all_images_exist(&args.images)?;
+
+    let user_config_data = 'block: {
+        let Some(home_directory) = home::home_dir() else {
+            println!("User directory not found");
+            break 'block None;
+        };
+        println!("User Directory Found: {}", home_directory.display());
+        let config_filename = ".image_viewer";
+        println!("{}", home_directory.join(config_filename).display());
+
+        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok() else {
+            println!("Config File not found: {}", home_directory.join(config_filename).display());
+            break 'block None;
+        };
+
+        toml::from_str(&config_str)?
+    };
+
+    let config_data = match user_config_data {
+        Some(data) => data,
+        None => {
+            let config_str = include_str!("../assets/default/config.toml");
+            let Some(config): Option<Config> = toml::from_str(config_str).ok() else {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid Default config : You messed up somewhere it should not happened",
+                )));
+            };
+            config
+        }
+    };
+
+    println!("Config: {:?}", config_data);
 
     App::new()
         .add_plugins(
@@ -63,6 +118,7 @@ fn main() -> Result<()> {
                 .set(ImagePlugin::default_nearest()),
         )
         .insert_resource(InitialImagesFilename(images_filename))
+        .insert_resource(config_data)
         .add_systems(Startup, setup)
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
@@ -175,7 +231,16 @@ fn setup(
     mut load_image_evw: EventWriter<LoadNewImageEvent>,
     mut fonts: ResMut<Assets<Font>>,
 ) {
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn(Camera2dBundle {
+        camera: Camera {
+            hdr: true,
+            ..default()
+        },
+        tonemapping: Tonemapping::None,
+        ..default()
+    });
+    // commands.spawn(Camera2dBundle::default());
+
     commands.spawn(GridLayout::Grid);
     commands.spawn(GlobalScale(1. / 8.));
     commands.spawn(TotalImageLoaded(0));
@@ -285,6 +350,7 @@ fn on_load_image(
 }
 
 fn on_image_loaded(
+    config: Res<Config>,
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
@@ -310,8 +376,14 @@ fn on_image_loaded(
         }
         let layout = layout_query.single();
         let visibility = match layout {
-            GridLayout::Stack => if already_loaded.0 != 0 { Visibility::Hidden } else { Visibility::Visible }
-            _ => Visibility::Visible
+            GridLayout::Stack => {
+                if already_loaded.0 != 0 {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Visible
+                }
+            }
+            _ => Visibility::Visible,
         };
 
         commands.spawn((
@@ -332,12 +404,12 @@ fn on_image_loaded(
         commands.spawn((
             TextBundle {
                 text: Text::from_section(
-                short_path,
-                TextStyle {
-                    font: font.0.clone(),
-                    font_size: 16.0,
-                    color: Color::GREEN,
-                },
+                    short_path,
+                    TextStyle {
+                        font: font.0.clone(),
+                        font_size: config.text.font_size,
+                        color: config.text.font_color,
+                    },
                 ),
                 visibility,
                 style: Style {
@@ -402,12 +474,13 @@ fn on_move_image(
         let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
         transform.translation =
             (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
-                .extend(transform.translation.z) * Vec3::new(1., -1., 1.);
+                .extend(transform.translation.z)
+                * Vec3::new(1., -1., 1.);
         transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
 
-        let delta =
-            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse.delta / (scale.0 * global_scale.0));
+        let delta = Vec2::from_angle(PI / 2. * rotation.0)
+            .rotate(position.0 + mouse.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotated_cell_size = if rotation.0 % 2. == 0. {
             cell_size
@@ -510,12 +583,13 @@ fn on_reset_visibility(
 }
 
 fn change_layout(
+    config: Res<Config>,
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut layout_query: Query<&mut GridLayout>,
 ) {
-    if keys.just_pressed(KeyCode::L) {
+    if keys.just_pressed(config.shortcut.switch_layout) {
         let mut layout = layout_query.single_mut();
         *layout = match *layout {
             GridLayout::Grid => GridLayout::Stack,
@@ -613,11 +687,12 @@ fn change_top_image(
 }
 
 fn change_rotation_image(
+    config: Res<Config>,
     keys: Res<Input<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut rotation_query: Query<&mut Rotation, With<MyImage>>,
 ) {
-    if keys.just_pressed(KeyCode::R) {
+    if keys.just_pressed(config.shortcut.rotate_images) {
         for mut rotation in &mut rotation_query {
             rotation.0 += 1.;
         }
@@ -664,6 +739,7 @@ fn change_global_zoom(
 }
 
 fn change_zoom_individually(
+    config: Res<Config>,
     windows: Query<&Window>,
     keys: Res<Input<KeyCode>>,
     buttons: Res<Input<MouseButton>>,
@@ -671,7 +747,7 @@ fn change_zoom_individually(
     layout_query: Query<&GridLayout>,
     mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
 ) {
-    if keys.pressed(KeyCode::Z) {
+    if keys.pressed(config.shortcut.local_zoom_modifier) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
             return;
         }
@@ -762,13 +838,14 @@ fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With
 }
 
 fn toggle_cursor(
+    config: Res<Config>,
     keys: Res<Input<KeyCode>>,
     mut windows: Query<&mut Window>,
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
     image_query: Query<&Id, With<MyImage>>,
 ) {
-    if keys.just_pressed(KeyCode::C) {
+    if keys.just_pressed(config.shortcut.switch_cursor) {
         if cursor_query.iter().count() == 0 {
             let mut window = windows.single_mut();
             window.cursor.visible = false;
@@ -837,10 +914,11 @@ fn toggle_cursor(
 }
 
 fn save_cropped(
+    config: Res<Config>,
     keys: Res<Input<KeyCode>>,
     image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
 ) {
-    if keys.just_pressed(KeyCode::P) {
+    if keys.just_pressed(config.shortcut.save_crop_image) {
         for (path, sprite) in &image_query {
             // Get Input image
             let input_path = Path::new(&path.0);
@@ -889,7 +967,13 @@ fn save_cropped(
             };
 
             let size = rect.max - rect.min;
-            let image_view = SubImage::new(&image, rect.min.x as u32, rect.min.y as u32, size.x as u32, size.y as u32);
+            let image_view = SubImage::new(
+                &image,
+                rect.min.x as u32,
+                rect.min.y as u32,
+                size.x as u32,
+                size.y as u32,
+            );
 
             let subimage = image_view.to_image();
 

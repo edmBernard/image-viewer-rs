@@ -1,0 +1,10 @@
+[shortcut]
+save_crop_image = "P"
+local_zoom_modifier = "Z"
+switch_cursor = "C"
+switch_layout = "L"
+rotate_images = "R"
+
+[text]
+font_color = { "Rgba"= { "red"= 0.0, "green"= 1.0, "blue"= 0.0, "alpha"= 1.0}}
+font_size = 16.0
