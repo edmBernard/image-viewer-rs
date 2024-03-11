@@ -253,8 +253,7 @@ fn on_load_image(
                 });
             }
             ColorType::Rgb16 | ColorType::Rgba16 => {
-                let image_8u = DynamicImage::ImageRgb8(image.into_rgb8());
-                let new_image = Image::from_dynamic(image_8u, true);
+                let new_image = Image::from_dynamic(image, true);
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
                     handle: handle,
