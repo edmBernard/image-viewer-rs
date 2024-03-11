@@ -1,6 +1,7 @@
 // #![allow(unused_variables)]
 #![windows_subsystem = "windows"]
 
+use std::f32::consts::{PI, TAU};
 use std::fs::canonicalize;
 use std::fs::File;
 use std::io::BufReader;
@@ -8,12 +9,14 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, Window, WindowResized};
 use clap::Parser;
-use image::{ColorType, DynamicImage, ImageFormat, SubImage};
-use std::f32::consts::{PI, TAU};
+use home;
+use image::{ColorType, ImageFormat, DynamicImage, SubImage};
+use serde::Deserialize;
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -262,8 +265,20 @@ fn on_load_image(
                     count: ev.count,
                 });
             }
+            ColorType::L16 => {
+                let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
+                // let new_image = Image::from_dynamic(image_8u, true);
+                let new_image = Image::from_dynamic(image_rgb16, true);
+                let handle = images.add(new_image);
+                loaded_evw.send(NewImageLoadedEvent {
+                    handle: handle,
+                    path: ev.path.clone(),
+                    index: ev.index,
+                    count: ev.count,
+                });
+            }
             _ => {
-                println!("image.color(): {:?}", image.color())
+                println!("Unsupported image type : image.color(): {:?}", image.color())
             }
         }
     }
