@@ -41,6 +41,10 @@ We use the crate [image-rs](https://crates.io/crates/image), so be support almos
 As image are uploaded as texture, the image should be compatible with [wgpu](https://crates.io/crates/wgpu) texture.
 For example currently 16u images are supported by converting them 8u.
 
+## Config
+
+There is a config file that allow to change shortcut, font and other things. you create a config file named `.image-viewer` at the root of the user directory. The default config is shown in [assets/default/config.toml](assets/default/config.toml).
+
 ## Build
 
 ### Get source

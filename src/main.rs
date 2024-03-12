@@ -23,7 +23,7 @@ type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
 #[derive(Parser, Debug)]
 #[clap(version, long_about = None)]
 struct Args {
-    /// Images to show
+    // Images to show
     images: Vec<String>,
 }
 
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
-                        resolution: [600., 300.].into(),
+                        resolution: [600., 350.].into(),
                         present_mode: PresentMode::AutoVsync,
                         ..default()
                     }),
@@ -251,7 +251,7 @@ fn setup(
             hdr: config.hdr.enabled,
             ..default()
         },
-        // tonemapping: Tonemapping::TonyMcMapface
+        // tonemapping: Tonemapping::TonyMcMapface,
         ..default()
     });
 
