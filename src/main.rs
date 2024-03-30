@@ -1068,7 +1068,6 @@ fn key_toggle_cursor(
 
 fn toggle_cursor(
     mut toggle_evr: EventReader<ToggleCursor>,
-    mut windows: Query<&mut Window>,
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
@@ -1077,7 +1076,6 @@ fn toggle_cursor(
     for _ev in toggle_evr.read() {
         if cursor_query.iter().count() == 0 {
             *cursor_state = MultiCursorEnabled(true);
-            let mut window = windows.single_mut();
             for id in &image_query {
                 commands
                     .spawn((
@@ -1134,7 +1132,6 @@ fn toggle_cursor(
             }
         } else {
             *cursor_state = MultiCursorEnabled(false);
-            let mut window = windows.single_mut();
             for entity in &cursor_query {
                 commands.entity(entity).despawn_recursive();
             }
