@@ -356,7 +356,6 @@ fn keycode_dropdown(
                 String::from(&key_previous[1..string_len - 1])
             }
         };
-        println!("{}", key_string);
         ui.text_edit_singleline(&mut key_string);
 
         let key_json = format!("\"{}\"", key_string);
