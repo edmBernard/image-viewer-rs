@@ -372,7 +372,6 @@ fn ui_example(
     mut layout_query: Query<&mut GridLayout>,
     mut ongoing_edit: Local<ConfigShortcutAsString>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
     mut ui_state: ResMut<UiState>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
     mut cursor_evw: EventWriter<ToggleCursor>,
@@ -416,7 +415,7 @@ fn ui_example(
                             let elem2 = ui.selectable_value(&mut *layout, GridLayout::Stack, "Stack").changed();
                             let elem3 = ui.selectable_value(&mut *layout, GridLayout::Horizontal, "Horizontal").changed();
                             let elem4 = ui.selectable_value(&mut *layout, GridLayout::Vertical, "Vertical").changed();
-                            if (elem1 || elem2 || elem3 || elem4) {
+                            if elem1 || elem2 || elem3 || elem4 {
                                 reset_vix_evw.send(ResetVisibilityEvent);
                             }
                         });
