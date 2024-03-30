@@ -11,11 +11,15 @@ use std::time::{Duration, Instant};
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
 use bevy::window::{PresentMode, Window, WindowResized};
+use bevy_egui::egui::CollapsingHeader;
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use clap::Parser;
 use home;
 use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::Deserialize;
+use serde_json;
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -50,6 +54,16 @@ struct ConfigShortcut {
     switch_cursor: KeyCode,
     switch_layout: KeyCode,
     rotate_images: KeyCode,
+}
+
+// Used to store temporary edition during manual edit
+#[derive(Default)]
+struct ConfigShortcutAsString {
+    save_crop_image: Option<String>,
+    local_zoom_modifier: Option<String>,
+    switch_cursor: Option<String>,
+    switch_layout: Option<String>,
+    rotate_images: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -118,7 +132,7 @@ fn main() -> Result<()> {
     println!("Config: {:?}", config_data);
 
     App::new()
-        .add_plugins(
+        .add_plugins((
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
@@ -130,14 +144,18 @@ fn main() -> Result<()> {
                     ..default()
                 })
                 .set(ImagePlugin::default_nearest()),
-        )
+            EguiPlugin,
+        ))
         .insert_resource(InitialImagesFilename(images_filename))
+        .insert_resource(UiState { visible: false })
         .insert_resource(config_data)
         .add_systems(Startup, setup)
+        .add_systems(Startup, configure_visuals)
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
         .add_event::<ResetVisibilityEvent>()
+        .add_systems(Update, ui_example)
         .add_systems(Update, change_layout)
         .add_systems(Update, change_layout_on_click)
         .add_systems(Update, change_global_zoom)
@@ -166,7 +184,12 @@ fn main() -> Result<()> {
 #[derive(Resource)]
 struct InitialImagesFilename(Vec<String>);
 
-#[derive(Component)]
+#[derive(Resource)]
+struct UiState {
+    visible: bool,
+}
+
+#[derive(Component, PartialEq, Debug)]
 enum GridLayout {
     Stack,
     Horizontal,
@@ -263,6 +286,7 @@ fn setup(
         delta: Vec2::ZERO,
         pressed: false,
     });
+
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
     let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
     let font_handle = fonts.add(font);
@@ -277,7 +301,7 @@ fn setup(
                 color: Color::ANTIQUE_WHITE,
             },
         )
-        .with_text_alignment(TextAlignment::Left)
+        .with_text_justify(JustifyText::Left)
         .with_style(Style {
             position_type: PositionType::Absolute,
             top: Val::Px(22.),
@@ -293,6 +317,105 @@ fn setup(
             path: image.clone(),
             index: index,
             count: count,
+        });
+    }
+}
+
+fn configure_visuals(mut egui_ctx: EguiContexts) {
+    egui_ctx.ctx_mut().set_visuals(egui::Visuals {
+        ..Default::default()
+    });
+}
+
+fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, ongoing: &mut Option<String>) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+
+        let Ok(key_previous) = serde_json::to_string(&current_key) else {
+            panic!("Should not happend: Can't convert KeyCode to string");
+        };
+        let mut key_string = match ongoing {
+            Some(value) => value.clone(),
+            None => {
+                let string_len = key_previous.len();
+                // strip quote
+                String::from(&key_previous[1..string_len-1])
+            },
+        };
+        println!("{}", key_string);
+        ui.text_edit_singleline(&mut key_string);
+
+        let key_json = format!("\"{}\"", key_string);
+        if let Ok(key) = serde_json::from_str::<KeyCode>(&key_json) {
+            *current_key = key;
+        }
+        *ongoing = Some(key_string);
+    });
+}
+
+fn ui_example(
+    mut contexts: EguiContexts,
+    mut config: ResMut<Config>,
+    mut layout_query: Query<&mut GridLayout>,
+    mut ongoing_edit: Local<ConfigShortcutAsString>,
+    ui_state: Res<UiState>,
+) {
+    if ui_state.visible {
+        egui::SidePanel::left("Settings").show(contexts.ctx_mut(), |ui| {
+            ui.heading("Settings");
+
+            ui.checkbox(
+                &mut config.misc.enable_zoom_on_scroll,
+                "Enable Zoom on Scroll",
+            );
+            let mut layout = layout_query.single_mut();
+            ui.horizontal(|ui| {
+                ui.label("Layout:");
+                egui::ComboBox::from_label("")
+                    .selected_text(format!("{:?}", *layout))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut *layout, GridLayout::Grid, "Grid");
+                        ui.selectable_value(&mut *layout, GridLayout::Stack, "Stack");
+                        ui.selectable_value(&mut *layout, GridLayout::Horizontal, "Horizontal");
+                        ui.selectable_value(&mut *layout, GridLayout::Vertical, "Vertical");
+                    });
+            });
+
+            CollapsingHeader::new("Style")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
+                    });
+                    let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
+                    ui.horizontal(|ui| {
+                        ui.label("Font Color:");
+                        ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
+                        ui.label(format!(
+                            "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            color_vec[0], color_vec[1], color_vec[2], color_vec[3],
+                        ));
+                    });
+                    config.text.font_color = Color::rgba_linear_from_array(color_vec);
+                });
+
+            CollapsingHeader::new("Short Cut")
+                .default_open(false)
+                .show(ui, |ui| {
+                        keycode_dropdown(ui, "Save Crop:", &mut config.shortcut.save_crop_image, &mut ongoing_edit.save_crop_image);
+                        keycode_dropdown(ui, "Local Zoom Modifier:", &mut config.shortcut.local_zoom_modifier, &mut ongoing_edit.local_zoom_modifier);
+                        keycode_dropdown(ui, "Change Cursor:", &mut config.shortcut.switch_cursor, &mut ongoing_edit.switch_cursor);
+                        keycode_dropdown(ui, "Rotate:", &mut config.shortcut.rotate_images, &mut ongoing_edit.rotate_images);
+                        keycode_dropdown(ui, "Change Layout:", &mut config.shortcut.switch_layout, &mut ongoing_edit.switch_layout);
+                });
+
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.hyperlink_to(
+                    "Source Code",
+                    "https://github.com/edmBernard/image-viewer-rs",
+                );
+            });
         });
     }
 }
@@ -325,7 +448,11 @@ fn on_load_image(
 
         match image.color() {
             ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
-                let new_image = Image::from_dynamic(image, true);
+                let new_image = Image::from_dynamic(
+                    image,
+                    true,
+                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+                );
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
                     handle: handle,
@@ -335,7 +462,11 @@ fn on_load_image(
                 });
             }
             ColorType::Rgb16 | ColorType::Rgba16 => {
-                let new_image = Image::from_dynamic(image, true);
+                let new_image = Image::from_dynamic(
+                    image,
+                    true,
+                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+                );
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
                     handle: handle,
@@ -346,7 +477,11 @@ fn on_load_image(
             }
             ColorType::L16 => {
                 let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
-                let new_image = Image::from_dynamic(image_rgb16, true);
+                let new_image = Image::from_dynamic(
+                    image_rgb16,
+                    true,
+                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+                );
                 let handle = images.add(new_image);
                 loaded_evw.send(NewImageLoadedEvent {
                     handle: handle,
@@ -434,7 +569,7 @@ fn on_image_loaded(
                 },
                 ..default()
             }
-            .with_text_alignment(TextAlignment::Left),
+            .with_text_justify(JustifyText::Left),
             Id(ev.index),
             MyText,
         ));
@@ -478,7 +613,6 @@ fn on_move_image(
     let window = windows.single();
     let num_images = sprite_position.iter().count();
     let global_scale = global_scale_query.single();
-
     for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in
         &mut sprite_position
     {
@@ -579,7 +713,7 @@ fn on_resize_system(
 fn on_reset_visibility(
     mut reset_evr: EventReader<ResetVisibilityEvent>,
     mut visibility_query: Query<(&Id, &mut Visibility)>,
-    layout_query: Query<&mut GridLayout>,
+    layout_query: Query<&GridLayout>,
 ) {
     for _ in reset_evr.read() {
         let layout = layout_query.single();
@@ -600,7 +734,7 @@ fn on_reset_visibility(
 
 fn change_layout(
     config: Res<Config>,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut layout_query: Query<&mut GridLayout>,
@@ -619,7 +753,7 @@ fn change_layout(
 }
 
 fn change_layout_on_click(
-    buttons: Res<Input<MouseButton>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut layout_query: Query<&mut GridLayout>,
@@ -651,7 +785,7 @@ fn change_layout_on_click(
 }
 
 fn change_top_image(
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut visibility_query: Query<(&Id, &mut Visibility)>,
     layout_query: Query<&GridLayout>,
@@ -661,25 +795,25 @@ fn change_top_image(
         return;
     }
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let index_on_top = if shift_pressed && keys.just_pressed(KeyCode::Key1) {
+    let index_on_top = if shift_pressed && keys.just_pressed(KeyCode::Digit1) {
         1
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key2) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit2) {
         2
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key3) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit3) {
         3
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key4) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit4) {
         4
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key5) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit5) {
         5
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key6) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit6) {
         6
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key7) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit7) {
         7
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key8) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit8) {
         8
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key9) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit9) {
         9
-    } else if shift_pressed && keys.just_pressed(KeyCode::Key0) {
+    } else if shift_pressed && keys.just_pressed(KeyCode::Digit0) {
         10
     } else {
         return;
@@ -704,7 +838,7 @@ fn change_top_image(
 
 fn change_rotation_image(
     config: Res<Config>,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut rotation_query: Query<&mut Rotation, With<MyImage>>,
 ) {
@@ -717,32 +851,32 @@ fn change_rotation_image(
 }
 
 fn change_global_zoom(
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut global_scale: Query<&mut GlobalScale>,
 ) {
     let mut global_scale = global_scale.single_mut();
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key1) {
+    let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit1) {
         -1.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key2) {
+    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit2) {
         -2.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key3) {
+    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit3) {
         -3.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key4) {
+    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit4) {
         -4.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Key5) {
+    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit5) {
         -5.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key1) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit1) {
         0.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key2) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit2) {
         1.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key3) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit3) {
         3.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key4) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit4) {
         4.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Key5) {
+    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit5) {
         5.
     } else {
         return;
@@ -757,8 +891,8 @@ fn change_global_zoom(
 fn change_zoom_individually(
     config: Res<Config>,
     windows: Query<&Window>,
-    keys: Res<Input<KeyCode>>,
-    buttons: Res<Input<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     layout_query: Query<&GridLayout>,
     mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
@@ -842,8 +976,13 @@ fn get_cell_rect(
     (cell_tl, cell_size)
 }
 
-fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With<MyHelp>>) {
-    if keys.just_pressed(KeyCode::H) {
+fn toggle_help(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut query: Query<&mut Visibility, With<MyHelp>>,
+    mut ui_state: ResMut<UiState>,
+) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        ui_state.visible = !ui_state.visible;
         let mut visibility = query.single_mut();
         *visibility = match *visibility {
             Visibility::Visible => Visibility::Hidden,
@@ -855,7 +994,7 @@ fn toggle_help(keys: Res<Input<KeyCode>>, mut query: Query<&mut Visibility, With
 
 fn toggle_cursor(
     config: Res<Config>,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut windows: Query<&mut Window>,
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
@@ -931,7 +1070,7 @@ fn toggle_cursor(
 
 fn save_cropped(
     config: Res<Config>,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
 ) {
     if keys.just_pressed(config.shortcut.save_crop_image) {
@@ -1026,7 +1165,7 @@ fn scroll_events(
 }
 
 fn mouse_button_input(
-    buttons: Res<Input<MouseButton>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     mut mouse_query: Query<&mut MouseState>,
     global_scale_query: Query<&GlobalScale>,

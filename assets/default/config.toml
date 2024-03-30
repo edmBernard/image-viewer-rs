@@ -1,14 +1,14 @@
 [shortcut]
 # Shortcut to save crop image shown on screen
-save_crop_image = "P"
+save_crop_image = "KeyP"
 # Shortcut to toggle the multicursor
-local_zoom_modifier = "Z"
+local_zoom_modifier = "KeyW"
 # Shortcut to toggle the multicursor
-switch_cursor = "C"
+switch_cursor = "KeyC"
 # Shortcut to switch between layout (grid, stack; horizontal ...)
-switch_layout = "L"
+switch_layout = "KeyL"
 # Shortcut to rotate all images
-rotate_images = "R"
+rotate_images = "KeyR"
 
 [text]
 # Color of the image name shown in the corner
