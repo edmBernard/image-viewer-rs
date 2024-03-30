@@ -21,4 +21,4 @@ enabled = false
 
 [misc]
 # Enable the zoom on mouse scroll
-enable_zoom_on_scroll = true
+zoom_on_scroll_enabled = true
