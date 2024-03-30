@@ -79,7 +79,7 @@ struct ConfigHDR {
 
 #[derive(Deserialize, Debug)]
 struct ConfigMisc {
-    enable_zoom_on_scroll: bool,
+    zoom_on_scroll_enabled: bool,
 }
 
 #[derive(Deserialize, Debug, Resource)]
@@ -89,6 +89,9 @@ struct Config {
     hdr: ConfigHDR,
     misc: ConfigMisc,
 }
+
+#[derive(Debug, Resource)]
+struct MultiCursorEnabled(bool);
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -149,11 +152,13 @@ fn main() -> Result<()> {
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState { visible: false })
         .insert_resource(config_data)
+        .insert_resource(MultiCursorEnabled(false))
         .add_systems(Startup, setup)
         .add_systems(Startup, configure_visuals)
         .add_event::<LoadNewImageEvent>()
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
+        .add_event::<ToggleCursor>()
         .add_event::<ResetVisibilityEvent>()
         .add_systems(Update, ui_example)
         .add_systems(Update, change_layout)
@@ -174,6 +179,7 @@ fn main() -> Result<()> {
         .add_systems(Update, on_move_image_title)
         .add_systems(Update, on_load_image)
         .add_systems(Update, toggle_help)
+        .add_systems(Update, key_toggle_cursor)
         .add_systems(Update, toggle_cursor)
         .add_systems(Update, save_cropped)
         .run();
@@ -237,6 +243,9 @@ struct MouseState {
 
 #[derive(Event)]
 struct MoveImageEvent;
+
+#[derive(Event)]
+struct ToggleCursor;
 
 #[derive(Event)]
 struct ResetVisibilityEvent;
@@ -327,7 +336,12 @@ fn configure_visuals(mut egui_ctx: EguiContexts) {
     });
 }
 
-fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, ongoing: &mut Option<String>) {
+fn keycode_dropdown(
+    ui: &mut egui::Ui,
+    label: &str,
+    current_key: &mut KeyCode,
+    ongoing: &mut Option<String>,
+) {
     ui.horizontal(|ui| {
         ui.label(label);
 
@@ -339,8 +353,8 @@ fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, o
             None => {
                 let string_len = key_previous.len();
                 // strip quote
-                String::from(&key_previous[1..string_len-1])
-            },
+                String::from(&key_previous[1..string_len - 1])
+            }
         };
         println!("{}", key_string);
         ui.text_edit_singleline(&mut key_string);
@@ -358,65 +372,116 @@ fn ui_example(
     mut config: ResMut<Config>,
     mut layout_query: Query<&mut GridLayout>,
     mut ongoing_edit: Local<ConfigShortcutAsString>,
-    ui_state: Res<UiState>,
+    mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
+    mut ui_state: ResMut<UiState>,
+    mut cursor_state: ResMut<MultiCursorEnabled>,
+    mut cursor_evw: EventWriter<ToggleCursor>,
 ) {
-    if ui_state.visible {
-        egui::SidePanel::left("Settings").show(contexts.ctx_mut(), |ui| {
-            ui.heading("Settings");
-
-            ui.checkbox(
-                &mut config.misc.enable_zoom_on_scroll,
-                "Enable Zoom on Scroll",
-            );
-            let mut layout = layout_query.single_mut();
-            ui.horizontal(|ui| {
-                ui.label("Layout:");
-                egui::ComboBox::from_label("")
-                    .selected_text(format!("{:?}", *layout))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut *layout, GridLayout::Grid, "Grid");
-                        ui.selectable_value(&mut *layout, GridLayout::Stack, "Stack");
-                        ui.selectable_value(&mut *layout, GridLayout::Horizontal, "Horizontal");
-                        ui.selectable_value(&mut *layout, GridLayout::Vertical, "Vertical");
-                    });
-            });
-
-            CollapsingHeader::new("Style")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Font Size:");
-                        ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
-                    });
-                    let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
-                    ui.horizontal(|ui| {
-                        ui.label("Font Color:");
-                        ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
-                        ui.label(format!(
-                            "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
-                            color_vec[0], color_vec[1], color_vec[2], color_vec[3],
-                        ));
-                    });
-                    config.text.font_color = Color::rgba_linear_from_array(color_vec);
-                });
-
-            CollapsingHeader::new("Short Cut")
-                .default_open(false)
-                .show(ui, |ui| {
-                        keycode_dropdown(ui, "Save Crop:", &mut config.shortcut.save_crop_image, &mut ongoing_edit.save_crop_image);
-                        keycode_dropdown(ui, "Local Zoom Modifier:", &mut config.shortcut.local_zoom_modifier, &mut ongoing_edit.local_zoom_modifier);
-                        keycode_dropdown(ui, "Change Cursor:", &mut config.shortcut.switch_cursor, &mut ongoing_edit.switch_cursor);
-                        keycode_dropdown(ui, "Rotate:", &mut config.shortcut.rotate_images, &mut ongoing_edit.rotate_images);
-                        keycode_dropdown(ui, "Change Layout:", &mut config.shortcut.switch_layout, &mut ongoing_edit.switch_layout);
-                });
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.hyperlink_to(
-                    "Source Code",
-                    "https://github.com/edmBernard/image-viewer-rs",
-                );
-            });
+    egui::TopBottomPanel::bottom("wrap_app_bottom_bar").show(contexts.ctx_mut(), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            egui::widgets::global_dark_light_mode_switch(ui);
+            ui.toggle_value(&mut ui_state.visible, "Settings");
         });
+    });
+
+    if ui_state.visible {
+        egui::SidePanel::right("Settings")
+            .resizable(false)
+            .show(contexts.ctx_mut(), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Settings");
+                });
+                ui.separator();
+
+                ui.checkbox(
+                    &mut config.misc.zoom_on_scroll_enabled,
+                    "Enable Zoom on Scroll"
+                );
+
+                if ui.checkbox(
+                    &mut cursor_state.0,
+                    "Enable Multi Cursor",
+                ).changed() {
+                    println!("Changed");
+                    cursor_evw.send(ToggleCursor);
+                };
+
+                let mut layout = layout_query.single_mut();
+                ui.horizontal(|ui| {
+                    ui.label("Layout:");
+                    egui::ComboBox::from_label("")
+                        .selected_text(format!("{:?}", *layout))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut *layout, GridLayout::Grid, "Grid");
+                            ui.selectable_value(&mut *layout, GridLayout::Stack, "Stack");
+                            ui.selectable_value(&mut *layout, GridLayout::Horizontal, "Horizontal");
+                            ui.selectable_value(&mut *layout, GridLayout::Vertical, "Vertical");
+                        });
+                });
+
+                CollapsingHeader::new("Style")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("New style is applied when new images are loaded");
+                        ui.horizontal(|ui| {
+                            ui.label("Font Size:");
+                            ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
+                        });
+                        let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
+                        ui.horizontal(|ui| {
+                            ui.label("Font Color:");
+                            ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
+                            ui.label(format!(
+                                "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                color_vec[0], color_vec[1], color_vec[2], color_vec[3],
+                            ));
+                        });
+                        config.text.font_color = Color::rgba_linear_from_array(color_vec);
+                    });
+
+                CollapsingHeader::new("Short Cut")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        keycode_dropdown(
+                            ui,
+                            "Save Crop:",
+                            &mut config.shortcut.save_crop_image,
+                            &mut ongoing_edit.save_crop_image,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            "Local Zoom Modifier:",
+                            &mut config.shortcut.local_zoom_modifier,
+                            &mut ongoing_edit.local_zoom_modifier,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            "Change Cursor:",
+                            &mut config.shortcut.switch_cursor,
+                            &mut ongoing_edit.switch_cursor,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            "Rotate:",
+                            &mut config.shortcut.rotate_images,
+                            &mut ongoing_edit.rotate_images,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            "Change Layout:",
+                            &mut config.shortcut.switch_layout,
+                            &mut ongoing_edit.switch_layout,
+                        );
+                    });
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.hyperlink_to(
+                        "Source Code",
+                        "https://github.com/edmBernard/image-viewer-rs",
+                    );
+                });
+            });
+        reset_vix_evw.send(ResetVisibilityEvent);
     }
 }
 
@@ -992,18 +1057,28 @@ fn toggle_help(
     }
 }
 
-fn toggle_cursor(
-    config: Res<Config>,
+fn key_toggle_cursor(
     keys: Res<ButtonInput<KeyCode>>,
+    config: Res<Config>,
+    mut toggle_evw: EventWriter<ToggleCursor>,
+) {
+    if keys.just_pressed(config.shortcut.switch_cursor) {
+        toggle_evw.send(ToggleCursor);
+    }
+}
+
+fn toggle_cursor(
+    mut toggle_evr: EventReader<ToggleCursor>,
     mut windows: Query<&mut Window>,
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
+    mut cursor_state: ResMut<MultiCursorEnabled>,
     image_query: Query<&Id, With<MyImage>>,
 ) {
-    if keys.just_pressed(config.shortcut.switch_cursor) {
+    for _ev in toggle_evr.read() {
         if cursor_query.iter().count() == 0 {
+            *cursor_state = MultiCursorEnabled(true);
             let mut window = windows.single_mut();
-            window.cursor.visible = false;
             for id in &image_query {
                 commands
                     .spawn((
@@ -1059,8 +1134,8 @@ fn toggle_cursor(
                     });
             }
         } else {
+            *cursor_state = MultiCursorEnabled(false);
             let mut window = windows.single_mut();
-            window.cursor.visible = true;
             for entity in &cursor_query {
                 commands.entity(entity).despawn_recursive();
             }
@@ -1147,7 +1222,7 @@ fn scroll_events(
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut global_scale_query: Query<&mut GlobalScale>,
 ) {
-    if config.misc.enable_zoom_on_scroll {
+    if config.misc.zoom_on_scroll_enabled {
         let mut global_scale = global_scale_query.single_mut();
         use bevy::input::mouse::MouseScrollUnit;
         for ev in scroll_evr.read() {
