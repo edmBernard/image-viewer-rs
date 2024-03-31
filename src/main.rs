@@ -47,6 +47,8 @@ Keyboard Shortcut:
     Drag and Drop image from files explorer.
 ";
 
+// -----------------------------
+// Config Struct
 #[derive(Deserialize, Debug)]
 struct ConfigShortcut {
     save_crop_image: KeyCode,
@@ -89,9 +91,6 @@ struct Config {
     hdr: ConfigHDR,
     misc: ConfigMisc,
 }
-
-#[derive(Debug, Resource)]
-struct MultiCursorEnabled(bool);
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -187,8 +186,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Resource)]
-struct InitialImagesFilename(Vec<String>);
+// -----------------------------
+// State Struct
+#[derive(Debug, Resource)]
+struct MultiCursorEnabled(bool);
+
 
 #[derive(Resource)]
 struct UiState {
@@ -203,21 +205,39 @@ enum GridLayout {
     Grid,
 }
 
+/// Rotation in quarter turn (1 is 1 turn)
 #[derive(Component)]
-struct Id(usize);
+struct Rotation(f32);
 
 #[derive(Component)]
 struct GlobalScale(f32);
+
+#[derive(Component)]
+struct MouseState {
+    origin: Vec2,
+    delta: Vec2,
+    pressed: bool,
+}
+
+#[derive(Component)]
+struct FontHandle(Handle<Font>);
+
+#[derive(Component)]
+struct TotalImageLoaded(usize);
+
+#[derive(Resource)]
+struct InitialImagesFilename(Vec<String>);
+
+// -----------------------------
+// Components
+#[derive(Component)]
+struct Id(usize);
 
 #[derive(Component)]
 struct Scale(f32);
 
 #[derive(Component)]
 struct Position(Vec2);
-
-/// Rotation in quarter turn (1 is 1 turn)
-#[derive(Component)]
-struct Rotation(f32);
 
 #[derive(Component)]
 struct ImagePath(String);
@@ -234,13 +254,8 @@ struct MyText;
 #[derive(Component)]
 struct MyHelp;
 
-#[derive(Component)]
-struct MouseState {
-    origin: Vec2,
-    delta: Vec2,
-    pressed: bool,
-}
-
+// -----------------------------
+// Events
 #[derive(Event)]
 struct MoveImageEvent;
 
@@ -257,12 +272,6 @@ struct NewImageLoadedEvent {
     index: usize,
     count: usize,
 }
-
-#[derive(Component)]
-struct TotalImageLoaded(usize);
-
-#[derive(Component)]
-struct FontHandle(Handle<Font>);
 
 #[derive(Event)]
 struct LoadNewImageEvent {
