@@ -152,7 +152,14 @@ fn main() -> Result<()> {
         .insert_resource(UiState { visible: false })
         .insert_resource(config_data)
         .insert_resource(TotalImageLoaded(0))
+        .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(MultiCursorEnabled(false))
+        .insert_resource(GridLayoutState(GridLayout::Grid))
+        .insert_resource(MouseState {
+            origin: Vec2::ZERO,
+            delta: Vec2::ZERO,
+            pressed: false,
+        })
         .add_systems(Startup, setup)
         .add_systems(Startup, configure_visuals)
         .add_event::<LoadNewImageEvent>()
@@ -197,7 +204,7 @@ struct UiState {
     visible: bool,
 }
 
-#[derive(Component, PartialEq, Debug)]
+#[derive(PartialEq, Debug)]
 enum GridLayout {
     Stack,
     Horizontal,
@@ -205,14 +212,13 @@ enum GridLayout {
     Grid,
 }
 
-/// Rotation in quarter turn (1 is 1 turn)
-#[derive(Component)]
-struct Rotation(f32);
+#[derive(Resource)]
+struct GridLayoutState(GridLayout);
 
-#[derive(Component)]
+#[derive(Resource)]
 struct GlobalScale(f32);
 
-#[derive(Component)]
+#[derive(Resource)]
 struct MouseState {
     origin: Vec2,
     delta: Vec2,
@@ -238,6 +244,10 @@ struct Scale(f32);
 
 #[derive(Component)]
 struct Position(Vec2);
+
+// Rotation in quarter turn (1 is 1 turn)
+#[derive(Component)]
+struct Rotation(f32);
 
 #[derive(Component)]
 struct ImagePath(String);
@@ -294,14 +304,6 @@ fn setup(
         },
         // tonemapping: Tonemapping::TonyMcMapface,
         ..default()
-    });
-
-    commands.spawn(GridLayout::Grid);
-    commands.spawn(GlobalScale(1. / 8.));
-    commands.spawn(MouseState {
-        origin: Vec2::ZERO,
-        delta: Vec2::ZERO,
-        pressed: false,
     });
 
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
@@ -377,7 +379,7 @@ fn keycode_dropdown(
 fn ui_example(
     mut contexts: EguiContexts,
     mut config: ResMut<Config>,
-    mut layout_query: Query<&mut GridLayout>,
+    mut layout_state: ResMut<GridLayoutState>,
     mut ongoing_edit: Local<ConfigShortcutAsString>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut ui_state: ResMut<UiState>,
@@ -412,28 +414,27 @@ fn ui_example(
                     cursor_evw.send(ToggleCursor);
                 };
 
-                let mut layout = layout_query.single_mut();
                 ui.horizontal(|ui| {
                     ui.label("Layout:");
 
                     egui::ComboBox::from_label("")
-                        .selected_text(format!("{:?}", *layout))
+                        .selected_text(format!("{:?}", layout_state.0))
                         .show_ui(ui, |ui| {
                             let elem1 = ui
-                                .selectable_value(&mut *layout, GridLayout::Grid, "Grid")
+                                .selectable_value(&mut layout_state.0, GridLayout::Grid, "Grid")
                                 .changed();
                             let elem2 = ui
-                                .selectable_value(&mut *layout, GridLayout::Stack, "Stack")
+                                .selectable_value(&mut layout_state.0, GridLayout::Stack, "Stack")
                                 .changed();
                             let elem3 = ui
                                 .selectable_value(
-                                    &mut *layout,
+                                    &mut layout_state.0,
                                     GridLayout::Horizontal,
                                     "Horizontal",
                                 )
                                 .changed();
                             let elem4 = ui
-                                .selectable_value(&mut *layout, GridLayout::Vertical, "Vertical")
+                                .selectable_value(&mut layout_state.0, GridLayout::Vertical, "Vertical")
                                 .changed();
                             if elem1 || elem2 || elem3 || elem4 {
                                 reset_vix_evw.send(ResetVisibilityEvent);
@@ -596,7 +597,7 @@ fn on_image_loaded(
     mut image_loaded: ResMut<TotalImageLoaded>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
 ) {
     for ev in load_image_evr.read() {
         let font = font_query.single();
@@ -610,8 +611,7 @@ fn on_image_loaded(
         if image_loaded.0 >= ev.count {
             image_loaded.0 = 0;
         }
-        let layout = layout_query.single();
-        let visibility = match layout {
+        let visibility = match layout_state.0 {
             GridLayout::Stack => {
                 if image_loaded.0 != 0 {
                     Visibility::Hidden
@@ -683,9 +683,9 @@ fn on_move_image(
         ),
         With<MyImage>,
     >,
-    global_scale_query: Query<&GlobalScale>,
-    layout_query: Query<&GridLayout>,
-    mouse_query: Query<&MouseState>,
+    global_scale: Res<GlobalScale>,
+    layout_state: Res<GridLayoutState>,
+    mouse_state: Res<MouseState>,
     mut title_query: Query<&mut Style, With<MyText>>,
 ) {
     if move_image_evr.is_empty() {
@@ -693,11 +693,8 @@ fn on_move_image(
     }
     move_image_evr.clear();
 
-    let layout = layout_query.single();
-    let mouse = mouse_query.single();
     let window = windows.single();
     let num_images = sprite_position.iter().count();
-    let global_scale = global_scale_query.single();
     for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in
         &mut sprite_position
     {
@@ -706,7 +703,7 @@ fn on_move_image(
         };
         let image_size = image.size().as_vec2();
 
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
         transform.translation =
             (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
                 .extend(transform.translation.z)
@@ -715,7 +712,7 @@ fn on_move_image(
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
 
         let delta = Vec2::from_angle(PI / 2. * rotation.0)
-            .rotate(position.0 + mouse.delta / (scale.0 * global_scale.0));
+            .rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotated_cell_size = if rotation.0 % 2. == 0. {
             cell_size
@@ -734,7 +731,7 @@ fn on_move_image(
         sprite.rect = Some(cell.intersect(image_crop));
     }
 
-    let (_, cell_size) = get_cell_rect(0, num_images, layout, window);
+    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.0, window);
     for mut style in &mut title_query {
         style.width = Val::Px(cell_size.x);
     }
@@ -744,7 +741,7 @@ fn on_move_image_title(
     mut move_image_evr: EventReader<MoveImageEvent>,
     windows: Query<&Window>,
     mut text_query: Query<(&Id, &mut Style), With<MyText>>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -752,11 +749,10 @@ fn on_move_image_title(
     move_image_evr.clear();
 
     let num_images = text_query.iter().count();
-    let layout = layout_query.single();
     let window = windows.single();
 
     for (id, mut style) in &mut text_query {
-        let (cell_offset, _) = get_cell_rect(id.0, num_images, layout, window);
+        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.0, window);
         style.top = Val::Px(cell_offset.y + 2.);
         style.left = Val::Px(cell_offset.x + 5.);
     }
@@ -765,17 +761,16 @@ fn on_move_image_title(
 fn on_move_cursor(
     windows: Query<&Window>,
     mut cursor_query: Query<(&Id, &mut Transform), With<MyCursor>>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
 ) {
     let num_images = cursor_query.iter().count();
-    let layout = layout_query.single();
     let window = windows.single();
 
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -798,12 +793,11 @@ fn on_resize_system(
 fn on_reset_visibility(
     mut reset_evr: EventReader<ResetVisibilityEvent>,
     mut visibility_query: Query<(&Id, &mut Visibility)>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
 ) {
     for _ in reset_evr.read() {
-        let layout = layout_query.single();
         for (i, mut visibility) in &mut visibility_query {
-            *visibility = match *layout {
+            *visibility = match layout_state.0 {
                 GridLayout::Stack => {
                     if i.0 == 0 {
                         Visibility::Visible
@@ -822,11 +816,10 @@ fn change_layout(
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
-    mut layout_query: Query<&mut GridLayout>,
+    mut layout_state: ResMut<GridLayoutState>,
 ) {
     if keys.just_pressed(config.shortcut.switch_layout) {
-        let mut layout = layout_query.single_mut();
-        *layout = match *layout {
+        layout_state.0 = match layout_state.0 {
             GridLayout::Grid => GridLayout::Stack,
             GridLayout::Stack => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Horizontal,
@@ -841,7 +834,7 @@ fn change_layout_on_click(
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
-    mut layout_query: Query<&mut GridLayout>,
+    mut layout_state: ResMut<GridLayoutState>,
     mut click_timer: Local<Option<Instant>>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {
@@ -857,8 +850,7 @@ fn change_layout_on_click(
         }
         *click_timer = Some(now);
 
-        let mut layout = layout_query.single_mut();
-        *layout = match *layout {
+        layout_state.0 = match layout_state.0 {
             GridLayout::Grid => GridLayout::Stack,
             GridLayout::Stack => GridLayout::Grid,
             GridLayout::Vertical => GridLayout::Horizontal,
@@ -873,7 +865,7 @@ fn change_top_image(
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut visibility_query: Query<(&Id, &mut Visibility)>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
 ) {
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if ctrl_pressed {
@@ -904,9 +896,8 @@ fn change_top_image(
         return;
     };
 
-    let layout = layout_query.single();
     for (i, mut visibility) in &mut visibility_query {
-        *visibility = match layout {
+        *visibility = match layout_state.0 {
             GridLayout::Stack => {
                 if i.0 == index_on_top - 1 {
                     Visibility::Visible
@@ -938,9 +929,8 @@ fn change_rotation_image(
 fn change_global_zoom(
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut global_scale: Query<&mut GlobalScale>,
+    mut global_scale: ResMut<GlobalScale>,
 ) {
-    let mut global_scale = global_scale.single_mut();
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit1) {
@@ -979,7 +969,7 @@ fn change_zoom_individually(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    layout_query: Query<&GridLayout>,
+    layout_state: Res<GridLayoutState>,
     mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
 ) {
     if keys.pressed(config.shortcut.local_zoom_modifier) {
@@ -988,7 +978,6 @@ fn change_zoom_individually(
         }
 
         let num_images = sprite_query.iter().count();
-        let layout = layout_query.single();
         let window = windows.single();
 
         let Some(cursor_position) = window.cursor_position() else {
@@ -1002,7 +991,7 @@ fn change_zoom_individually(
 
         let position_normalized = 'outer: {
             for (id, mut scale, position) in &mut sprite_query {
-                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, layout, window);
+                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
@@ -1237,10 +1226,9 @@ fn scroll_events(
     config: Res<Config>,
     mut scroll_evr: EventReader<MouseWheel>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut global_scale_query: Query<&mut GlobalScale>,
+    mut global_scale: ResMut<GlobalScale>,
 ) {
     if config.misc.zoom_on_scroll_enabled {
-        let mut global_scale = global_scale_query.single_mut();
         use bevy::input::mouse::MouseScrollUnit;
         for ev in scroll_evr.read() {
             let scroll = match ev.unit {
@@ -1259,8 +1247,8 @@ fn scroll_events(
 fn mouse_button_input(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
-    mut mouse_query: Query<&mut MouseState>,
-    global_scale_query: Query<&GlobalScale>,
+    mut mouse_state: ResMut<MouseState>,
+    global_scale: Res<GlobalScale>,
     mut image_query: Query<(&mut Position, &Scale), With<MyImage>>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {
@@ -1268,44 +1256,40 @@ fn mouse_button_input(
         let Some(cursor_position) = window.cursor_position() else {
             return;
         };
-        let mut mouse = mouse_query.single_mut();
-        mouse.pressed = true;
-        mouse.origin = cursor_position;
-        mouse.delta = Vec2::ZERO;
+        mouse_state.pressed = true;
+        mouse_state.origin = cursor_position;
+        mouse_state.delta = Vec2::ZERO;
     }
     if buttons.just_released(MouseButton::Left) {
-        let mut mouse = mouse_query.single_mut();
-        let global_scale = global_scale_query.single();
-        mouse.pressed = false;
+        mouse_state.pressed = false;
 
         let window = windows.single();
 
         let Some(cursor_position) = window.cursor_position() else {
             // Cursor is outside of the windows
             for (mut position, scale) in &mut image_query {
-                position.0 += mouse.delta / (scale.0 * global_scale.0);
-                let delta = mouse.delta;
-                mouse.origin += delta / (scale.0 * global_scale.0);
+                position.0 += mouse_state.delta / (scale.0 * global_scale.0);
+                let delta = mouse_state.delta;
+                mouse_state.origin += delta / (scale.0 * global_scale.0);
             }
-            mouse.delta = Vec2::ZERO;
+            mouse_state.delta = Vec2::ZERO;
             return;
         };
 
         for (mut position, scale) in &mut image_query {
-            position.0 += (cursor_position - mouse.origin) / (scale.0 * global_scale.0);
+            position.0 += (cursor_position - mouse_state.origin) / (scale.0 * global_scale.0);
         }
-        mouse.origin = cursor_position;
-        mouse.delta = Vec2::ZERO;
+        mouse_state.origin = cursor_position;
+        mouse_state.delta = Vec2::ZERO;
     }
 }
 
 fn cursor_move(
     mut cursor_evr: EventReader<CursorMoved>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut mouse_query: Query<&mut MouseState>,
+    mut mouse_state: ResMut<MouseState>,
 ) {
     for ev in cursor_evr.read() {
-        let mut mouse_state = mouse_query.single_mut();
         if mouse_state.pressed {
             mouse_state.delta = ev.position - mouse_state.origin;
             move_image_evw.send(MoveImageEvent);
