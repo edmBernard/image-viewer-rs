@@ -105,8 +105,7 @@ fn main() -> Result<()> {
         let config_filename = ".image_viewer";
         println!("{}", home_directory.join(config_filename).display());
 
-        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok()
-        else {
+        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok() else {
             println!(
                 "Config File not found: {}",
                 home_directory.join(config_filename).display()
@@ -343,17 +342,10 @@ fn setup(
 }
 
 fn configure_visuals(mut egui_ctx: EguiContexts) {
-    egui_ctx.ctx_mut().set_visuals(egui::Visuals {
-        ..Default::default()
-    });
+    egui_ctx.ctx_mut().set_visuals(egui::Visuals { ..Default::default() });
 }
 
-fn keycode_dropdown(
-    ui: &mut egui::Ui,
-    label: &str,
-    current_key: &mut KeyCode,
-    ongoing: &mut Option<String>,
-) {
+fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, ongoing: &mut Option<String>) {
     ui.horizontal(|ui| {
         ui.label(label);
 
@@ -385,6 +377,7 @@ fn ui_example(
     mut ongoing_edit: Local<ConfigShortcutAsString>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     mut ui_state: ResMut<UiState>,
+    mut global_scale: ResMut<GlobalScale>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
     mut cursor_evw: EventWriter<ToggleCursor>,
 ) {
@@ -393,12 +386,36 @@ fn ui_example(
             egui::widgets::global_dark_light_mode_switch(ui);
             ui.toggle_value(&mut ui_state.visible, "Settings");
             ui.separator();
+            let mut scale = global_scale.0.log2();
+            if ui
+                .add(egui::DragValue::new(&mut scale).speed(0.1).clamp_range(-10.0..=10.))
+                .changed()
+            {
+                global_scale.0 = 2f32.powf(scale);
+            }
+            ui.separator();
             for i in 0..10 {
                 let mut state = i == layout_state.index;
                 if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
                     layout_state.index = i;
                     reset_vix_evw.send(ResetVisibilityEvent);
                 }
+            }
+            ui.separator();
+            let elem1 = ui
+                .selectable_value(&mut layout_state.layout, GridLayout::Grid, "Grid")
+                .changed();
+            let elem2 = ui
+                .selectable_value(&mut layout_state.layout, GridLayout::Stack, "Stack")
+                .changed();
+            let elem3 = ui
+                .selectable_value(&mut layout_state.layout, GridLayout::Horizontal, "Horizontal")
+                .changed();
+            let elem4 = ui
+                .selectable_value(&mut layout_state.layout, GridLayout::Vertical, "Vertical")
+                .changed();
+            if elem1 || elem2 || elem3 || elem4 {
+                reset_vix_evw.send(ResetVisibilityEvent);
             }
         });
     });
@@ -412,118 +429,65 @@ fn ui_example(
                 });
                 ui.separator();
 
-                ui.checkbox(
-                    &mut config.misc.zoom_on_scroll_enabled,
-                    "Enable Zoom on Scroll",
-                );
+                ui.checkbox(&mut config.misc.zoom_on_scroll_enabled, "Enable Zoom on Scroll");
 
-                if ui
-                    .checkbox(&mut cursor_state.0, "Enable Multi Cursor")
-                    .changed()
-                {
+                if ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor").changed() {
                     cursor_evw.send(ToggleCursor);
                 };
 
-                ui.horizontal(|ui| {
-                    ui.label("Layout:");
-
-                    egui::ComboBox::from_label("")
-                        .selected_text(format!("{:?}", layout_state.layout))
-                        .show_ui(ui, |ui| {
-                            let elem1 = ui
-                                .selectable_value(
-                                    &mut layout_state.layout,
-                                    GridLayout::Grid,
-                                    "Grid",
-                                )
-                                .changed();
-                            let elem2 = ui
-                                .selectable_value(
-                                    &mut layout_state.layout,
-                                    GridLayout::Stack,
-                                    "Stack",
-                                )
-                                .changed();
-                            let elem3 = ui
-                                .selectable_value(
-                                    &mut layout_state.layout,
-                                    GridLayout::Horizontal,
-                                    "Horizontal",
-                                )
-                                .changed();
-                            let elem4 = ui
-                                .selectable_value(
-                                    &mut layout_state.layout,
-                                    GridLayout::Vertical,
-                                    "Vertical",
-                                )
-                                .changed();
-                            if elem1 || elem2 || elem3 || elem4 {
-                                reset_vix_evw.send(ResetVisibilityEvent);
-                            }
-                        });
+                CollapsingHeader::new("Style").default_open(false).show(ui, |ui| {
+                    ui.label("New style is applied when new images are loaded");
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
+                    });
+                    let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
+                    ui.horizontal(|ui| {
+                        ui.label("Font Color:");
+                        ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
+                        ui.label(format!(
+                            "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            color_vec[0], color_vec[1], color_vec[2], color_vec[3],
+                        ));
+                    });
+                    config.text.font_color = Color::rgba_linear_from_array(color_vec);
                 });
 
-                CollapsingHeader::new("Style")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label("New style is applied when new images are loaded");
-                        ui.horizontal(|ui| {
-                            ui.label("Font Size:");
-                            ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
-                        });
-                        let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
-                        ui.horizontal(|ui| {
-                            ui.label("Font Color:");
-                            ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
-                            ui.label(format!(
-                                "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                color_vec[0], color_vec[1], color_vec[2], color_vec[3],
-                            ));
-                        });
-                        config.text.font_color = Color::rgba_linear_from_array(color_vec);
-                    });
-
-                CollapsingHeader::new("Short Cut")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        keycode_dropdown(
-                            ui,
-                            "Save Crop:",
-                            &mut config.shortcut.save_crop_image,
-                            &mut ongoing_edit.save_crop_image,
-                        );
-                        keycode_dropdown(
-                            ui,
-                            "Local Zoom Modifier:",
-                            &mut config.shortcut.local_zoom_modifier,
-                            &mut ongoing_edit.local_zoom_modifier,
-                        );
-                        keycode_dropdown(
-                            ui,
-                            "Change Cursor:",
-                            &mut config.shortcut.switch_cursor,
-                            &mut ongoing_edit.switch_cursor,
-                        );
-                        keycode_dropdown(
-                            ui,
-                            "Rotate:",
-                            &mut config.shortcut.rotate_images,
-                            &mut ongoing_edit.rotate_images,
-                        );
-                        keycode_dropdown(
-                            ui,
-                            "Change Layout:",
-                            &mut config.shortcut.switch_layout,
-                            &mut ongoing_edit.switch_layout,
-                        );
-                    });
+                CollapsingHeader::new("Short Cut").default_open(false).show(ui, |ui| {
+                    keycode_dropdown(
+                        ui,
+                        "Save Crop:",
+                        &mut config.shortcut.save_crop_image,
+                        &mut ongoing_edit.save_crop_image,
+                    );
+                    keycode_dropdown(
+                        ui,
+                        "Local Zoom Modifier:",
+                        &mut config.shortcut.local_zoom_modifier,
+                        &mut ongoing_edit.local_zoom_modifier,
+                    );
+                    keycode_dropdown(
+                        ui,
+                        "Change Cursor:",
+                        &mut config.shortcut.switch_cursor,
+                        &mut ongoing_edit.switch_cursor,
+                    );
+                    keycode_dropdown(
+                        ui,
+                        "Rotate:",
+                        &mut config.shortcut.rotate_images,
+                        &mut ongoing_edit.rotate_images,
+                    );
+                    keycode_dropdown(
+                        ui,
+                        "Change Layout:",
+                        &mut config.shortcut.switch_layout,
+                        &mut ongoing_edit.switch_layout,
+                    );
+                });
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.hyperlink_to(
-                        "Source Code",
-                        "https://github.com/edmBernard/image-viewer-rs",
-                    );
+                    ui.hyperlink_to("Source Code", "https://github.com/edmBernard/image-viewer-rs");
                 });
             });
     }
@@ -600,10 +564,7 @@ fn on_load_image(
                 });
             }
             _ => {
-                println!(
-                    "Unsupported image type : image.color(): {:?}",
-                    image.color()
-                )
+                println!("Unsupported image type : image.color(): {:?}", image.color())
             }
         }
     }
@@ -719,25 +680,21 @@ fn on_move_image(
 
     let window = windows.single();
     let num_images = sprite_position.iter().count();
-    for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in
-        &mut sprite_position
-    {
+    for (id, image_handle, position, scale, rotation, mut transform, mut sprite) in &mut sprite_position {
         let Some(image) = assets.get(image_handle) else {
             continue;
         };
         let image_size = image.size().as_vec2();
 
-        let (cell_offset, cell_size) =
-            get_cell_rect(id.0, num_images, &layout_state.layout, window);
-        transform.translation =
-            (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
-                .extend(transform.translation.z)
-                * Vec3::new(1., -1., 1.);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+        transform.translation = (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
+            .extend(transform.translation.z)
+            * Vec3::new(1., -1., 1.);
         transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
 
-        let delta = Vec2::from_angle(PI / 2. * rotation.0)
-            .rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
+        let delta =
+            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotated_cell_size = if rotation.0 % 2. == 0. {
             cell_size
@@ -795,8 +752,7 @@ fn on_move_cursor(
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let (cell_offset, cell_size) =
-            get_cell_rect(id.0, num_images, &layout_state.layout, window);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -807,10 +763,7 @@ fn on_move_cursor(
     }
 }
 
-fn on_resize_system(
-    mut resize_evr: EventReader<WindowResized>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
-) {
+fn on_resize_system(mut resize_evr: EventReader<WindowResized>, mut move_image_evw: EventWriter<MoveImageEvent>) {
     for _ in resize_evr.read() {
         move_image_evw.send(MoveImageEvent);
     }
@@ -1018,8 +971,7 @@ fn change_zoom_individually(
 
         let position_normalized = 'outer: {
             for (id, mut scale, position) in &mut sprite_query {
-                let (cell_offset, cell_size) =
-                    get_cell_rect(id.0, num_images, &layout_state.layout, window);
+                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
@@ -1044,12 +996,7 @@ fn change_zoom_individually(
     }
 }
 
-fn get_cell_rect(
-    index: usize,
-    num_images: usize,
-    layout: &GridLayout,
-    window: &Window,
-) -> (Vec2, Vec2) {
+fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window) -> (Vec2, Vec2) {
     let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / num_images as f32, 0.);
@@ -1094,11 +1041,7 @@ fn toggle_help(
     }
 }
 
-fn key_toggle_cursor(
-    keys: Res<ButtonInput<KeyCode>>,
-    config: Res<Config>,
-    mut toggle_evw: EventWriter<ToggleCursor>,
-) {
+fn key_toggle_cursor(keys: Res<ButtonInput<KeyCode>>, config: Res<Config>, mut toggle_evw: EventWriter<ToggleCursor>) {
     if keys.just_pressed(config.shortcut.switch_cursor) {
         toggle_evw.send(ToggleCursor);
     }
@@ -1325,10 +1268,7 @@ fn cursor_move(
     }
 }
 
-fn file_drop(
-    mut dnd_evr: EventReader<FileDragAndDrop>,
-    mut load_image_evw: EventWriter<LoadNewImageEvent>,
-) {
+fn file_drop(mut dnd_evr: EventReader<FileDragAndDrop>, mut load_image_evw: EventWriter<LoadNewImageEvent>) {
     let mut images_filename = Vec::new();
 
     for ev in dnd_evr.read() {
@@ -1351,10 +1291,7 @@ fn file_drop(
 }
 
 fn bound(vec: Vec2, rect: Rect) -> Vec2 {
-    Vec2::new(
-        vec.x.clamp(rect.min.x, rect.max.x),
-        vec.y.clamp(rect.min.y, rect.max.y),
-    )
+    Vec2::new(vec.x.clamp(rect.min.x, rect.max.x), vec.y.clamp(rect.min.y, rect.max.y))
 }
 
 fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
