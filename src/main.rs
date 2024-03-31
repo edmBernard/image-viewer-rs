@@ -151,10 +151,12 @@ fn main() -> Result<()> {
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState { visible: false })
         .insert_resource(config_data)
-        .insert_resource(TotalImageLoaded(0))
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(MultiCursorEnabled(false))
-        .insert_resource(GridLayoutState(GridLayout::Grid))
+        .insert_resource(GridLayoutState {
+            layout: GridLayout::Grid,
+            index: 0,
+        })
         .insert_resource(MouseState {
             origin: Vec2::ZERO,
             delta: Vec2::ZERO,
@@ -213,7 +215,10 @@ enum GridLayout {
 }
 
 #[derive(Resource)]
-struct GridLayoutState(GridLayout);
+struct GridLayoutState {
+    layout: GridLayout,
+    index: usize,
+}
 
 #[derive(Resource)]
 struct GlobalScale(f32);
@@ -227,9 +232,6 @@ struct MouseState {
 
 #[derive(Component)]
 struct FontHandle(Handle<Font>);
-
-#[derive(Resource)]
-struct TotalImageLoaded(usize);
 
 #[derive(Resource)]
 struct InitialImagesFilename(Vec<String>);
@@ -390,6 +392,14 @@ fn ui_example(
         ui.horizontal_wrapped(|ui| {
             egui::widgets::global_dark_light_mode_switch(ui);
             ui.toggle_value(&mut ui_state.visible, "Settings");
+            ui.separator();
+            for i in 0..10 {
+                let mut state = i == layout_state.index;
+                if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
+                    layout_state.index = i;
+                    reset_vix_evw.send(ResetVisibilityEvent);
+                }
+            }
         });
     });
 
@@ -418,23 +428,35 @@ fn ui_example(
                     ui.label("Layout:");
 
                     egui::ComboBox::from_label("")
-                        .selected_text(format!("{:?}", layout_state.0))
+                        .selected_text(format!("{:?}", layout_state.layout))
                         .show_ui(ui, |ui| {
                             let elem1 = ui
-                                .selectable_value(&mut layout_state.0, GridLayout::Grid, "Grid")
+                                .selectable_value(
+                                    &mut layout_state.layout,
+                                    GridLayout::Grid,
+                                    "Grid",
+                                )
                                 .changed();
                             let elem2 = ui
-                                .selectable_value(&mut layout_state.0, GridLayout::Stack, "Stack")
+                                .selectable_value(
+                                    &mut layout_state.layout,
+                                    GridLayout::Stack,
+                                    "Stack",
+                                )
                                 .changed();
                             let elem3 = ui
                                 .selectable_value(
-                                    &mut layout_state.0,
+                                    &mut layout_state.layout,
                                     GridLayout::Horizontal,
                                     "Horizontal",
                                 )
                                 .changed();
                             let elem4 = ui
-                                .selectable_value(&mut layout_state.0, GridLayout::Vertical, "Vertical")
+                                .selectable_value(
+                                    &mut layout_state.layout,
+                                    GridLayout::Vertical,
+                                    "Vertical",
+                                )
                                 .changed();
                             if elem1 || elem2 || elem3 || elem4 {
                                 reset_vix_evw.send(ResetVisibilityEvent);
@@ -594,7 +616,7 @@ fn on_image_loaded(
     mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
-    mut image_loaded: ResMut<TotalImageLoaded>,
+    mut image_loaded: Local<usize>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
     layout_state: Res<GridLayoutState>,
@@ -602,18 +624,15 @@ fn on_image_loaded(
     for ev in load_image_evr.read() {
         let font = font_query.single();
 
-        if image_loaded.0 == 0 {
+        if *image_loaded == 0 {
             for entity in &images {
                 commands.entity(entity).despawn();
             }
         }
-        image_loaded.0 += 1;
-        if image_loaded.0 >= ev.count {
-            image_loaded.0 = 0;
-        }
-        let visibility = match layout_state.0 {
+        println!("image loaded count : {}", *image_loaded);
+        let visibility = match layout_state.layout {
             GridLayout::Stack => {
-                if image_loaded.0 != 0 {
+                if *image_loaded != layout_state.index {
                     Visibility::Hidden
                 } else {
                     Visibility::Visible
@@ -621,6 +640,11 @@ fn on_image_loaded(
             }
             _ => Visibility::Visible,
         };
+
+        *image_loaded += 1;
+        if *image_loaded >= ev.count {
+            *image_loaded = 0;
+        }
 
         commands.spawn((
             SpriteBundle {
@@ -703,7 +727,8 @@ fn on_move_image(
         };
         let image_size = image.size().as_vec2();
 
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
+        let (cell_offset, cell_size) =
+            get_cell_rect(id.0, num_images, &layout_state.layout, window);
         transform.translation =
             (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
                 .extend(transform.translation.z)
@@ -731,7 +756,7 @@ fn on_move_image(
         sprite.rect = Some(cell.intersect(image_crop));
     }
 
-    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.0, window);
+    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window);
     for mut style in &mut title_query {
         style.width = Val::Px(cell_size.x);
     }
@@ -752,7 +777,7 @@ fn on_move_image_title(
     let window = windows.single();
 
     for (id, mut style) in &mut text_query {
-        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.0, window);
+        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
         style.top = Val::Px(cell_offset.y + 2.);
         style.left = Val::Px(cell_offset.x + 5.);
     }
@@ -770,7 +795,8 @@ fn on_move_cursor(
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
+        let (cell_offset, cell_size) =
+            get_cell_rect(id.0, num_images, &layout_state.layout, window);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -797,9 +823,9 @@ fn on_reset_visibility(
 ) {
     for _ in reset_evr.read() {
         for (i, mut visibility) in &mut visibility_query {
-            *visibility = match layout_state.0 {
+            *visibility = match layout_state.layout {
                 GridLayout::Stack => {
-                    if i.0 == 0 {
+                    if i.0 == layout_state.index {
                         Visibility::Visible
                     } else {
                         Visibility::Hidden
@@ -819,7 +845,7 @@ fn change_layout(
     mut layout_state: ResMut<GridLayoutState>,
 ) {
     if keys.just_pressed(config.shortcut.switch_layout) {
-        layout_state.0 = match layout_state.0 {
+        layout_state.layout = match layout_state.layout {
             GridLayout::Grid => GridLayout::Stack,
             GridLayout::Stack => GridLayout::Vertical,
             GridLayout::Vertical => GridLayout::Horizontal,
@@ -850,7 +876,7 @@ fn change_layout_on_click(
         }
         *click_timer = Some(now);
 
-        layout_state.0 = match layout_state.0 {
+        layout_state.layout = match layout_state.layout {
             GridLayout::Grid => GridLayout::Stack,
             GridLayout::Stack => GridLayout::Grid,
             GridLayout::Vertical => GridLayout::Horizontal,
@@ -865,14 +891,14 @@ fn change_top_image(
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut visibility_query: Query<(&Id, &mut Visibility)>,
-    layout_state: Res<GridLayoutState>,
+    mut layout_state: ResMut<GridLayoutState>,
 ) {
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if ctrl_pressed {
         return;
     }
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let index_on_top = if shift_pressed && keys.just_pressed(KeyCode::Digit1) {
+    layout_state.index = if shift_pressed && keys.just_pressed(KeyCode::Digit1) {
         1
     } else if shift_pressed && keys.just_pressed(KeyCode::Digit2) {
         2
@@ -895,11 +921,12 @@ fn change_top_image(
     } else {
         return;
     };
+    layout_state.index -= 1;
 
     for (i, mut visibility) in &mut visibility_query {
-        *visibility = match layout_state.0 {
+        *visibility = match layout_state.layout {
             GridLayout::Stack => {
-                if i.0 == index_on_top - 1 {
+                if i.0 == layout_state.index {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
@@ -991,7 +1018,8 @@ fn change_zoom_individually(
 
         let position_normalized = 'outer: {
             for (id, mut scale, position) in &mut sprite_query {
-                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.0, window);
+                let (cell_offset, cell_size) =
+                    get_cell_rect(id.0, num_images, &layout_state.layout, window);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
