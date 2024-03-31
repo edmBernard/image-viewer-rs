@@ -151,6 +151,7 @@ fn main() -> Result<()> {
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState { visible: false })
         .insert_resource(config_data)
+        .insert_resource(TotalImageLoaded(0))
         .insert_resource(MultiCursorEnabled(false))
         .add_systems(Startup, setup)
         .add_systems(Startup, configure_visuals)
@@ -191,7 +192,6 @@ fn main() -> Result<()> {
 #[derive(Debug, Resource)]
 struct MultiCursorEnabled(bool);
 
-
 #[derive(Resource)]
 struct UiState {
     visible: bool,
@@ -222,7 +222,7 @@ struct MouseState {
 #[derive(Component)]
 struct FontHandle(Handle<Font>);
 
-#[derive(Component)]
+#[derive(Resource)]
 struct TotalImageLoaded(usize);
 
 #[derive(Resource)]
@@ -298,7 +298,6 @@ fn setup(
 
     commands.spawn(GridLayout::Grid);
     commands.spawn(GlobalScale(1. / 8.));
-    commands.spawn(TotalImageLoaded(0));
     commands.spawn(MouseState {
         origin: Vec2::ZERO,
         delta: Vec2::ZERO,
@@ -403,13 +402,13 @@ fn ui_example(
 
                 ui.checkbox(
                     &mut config.misc.zoom_on_scroll_enabled,
-                    "Enable Zoom on Scroll"
+                    "Enable Zoom on Scroll",
                 );
 
-                if ui.checkbox(
-                    &mut cursor_state.0,
-                    "Enable Multi Cursor",
-                ).changed() {
+                if ui
+                    .checkbox(&mut cursor_state.0, "Enable Multi Cursor")
+                    .changed()
+                {
                     cursor_evw.send(ToggleCursor);
                 };
 
@@ -418,12 +417,24 @@ fn ui_example(
                     ui.label("Layout:");
 
                     egui::ComboBox::from_label("")
-                    .selected_text(format!("{:?}", *layout))
-                    .show_ui(ui, |ui| {
-                            let elem1 = ui.selectable_value(&mut *layout, GridLayout::Grid, "Grid").changed();
-                            let elem2 = ui.selectable_value(&mut *layout, GridLayout::Stack, "Stack").changed();
-                            let elem3 = ui.selectable_value(&mut *layout, GridLayout::Horizontal, "Horizontal").changed();
-                            let elem4 = ui.selectable_value(&mut *layout, GridLayout::Vertical, "Vertical").changed();
+                        .selected_text(format!("{:?}", *layout))
+                        .show_ui(ui, |ui| {
+                            let elem1 = ui
+                                .selectable_value(&mut *layout, GridLayout::Grid, "Grid")
+                                .changed();
+                            let elem2 = ui
+                                .selectable_value(&mut *layout, GridLayout::Stack, "Stack")
+                                .changed();
+                            let elem3 = ui
+                                .selectable_value(
+                                    &mut *layout,
+                                    GridLayout::Horizontal,
+                                    "Horizontal",
+                                )
+                                .changed();
+                            let elem4 = ui
+                                .selectable_value(&mut *layout, GridLayout::Vertical, "Vertical")
+                                .changed();
                             if elem1 || elem2 || elem3 || elem4 {
                                 reset_vix_evw.send(ResetVisibilityEvent);
                             }
@@ -582,28 +593,27 @@ fn on_image_loaded(
     mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
-    mut count_query: Query<&mut TotalImageLoaded>,
+    mut image_loaded: ResMut<TotalImageLoaded>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
     layout_query: Query<&GridLayout>,
 ) {
     for ev in load_image_evr.read() {
-        let mut already_loaded = count_query.single_mut();
         let font = font_query.single();
 
-        if already_loaded.0 == 0 {
+        if image_loaded.0 == 0 {
             for entity in &images {
                 commands.entity(entity).despawn();
             }
         }
-        already_loaded.0 += 1;
-        if already_loaded.0 >= ev.count {
-            already_loaded.0 = 0;
+        image_loaded.0 += 1;
+        if image_loaded.0 >= ev.count {
+            image_loaded.0 = 0;
         }
         let layout = layout_query.single();
         let visibility = match layout {
             GridLayout::Stack => {
-                if already_loaded.0 != 0 {
+                if image_loaded.0 != 0 {
                     Visibility::Hidden
                 } else {
                     Visibility::Visible
