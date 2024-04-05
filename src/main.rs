@@ -167,6 +167,8 @@ fn main() -> Result<()> {
         .add_event::<MoveImageEvent>()
         .add_event::<ToggleCursor>()
         .add_event::<ResetVisibilityEvent>()
+        .add_event::<ResetScales>()
+        .add_event::<FitToScreen>()
         .add_systems(Update, ui_example)
         .add_systems(Update, change_layout)
         .add_systems(Update, change_layout_on_click)
@@ -188,6 +190,8 @@ fn main() -> Result<()> {
         .add_systems(Update, toggle_help)
         .add_systems(Update, key_toggle_cursor)
         .add_systems(Update, toggle_cursor)
+        .add_systems(Update, reset_scales)
+        .add_systems(Update, fit_to_screen)
         .add_systems(Update, save_cropped)
         .run();
 
@@ -271,6 +275,12 @@ struct MoveImageEvent;
 
 #[derive(Event)]
 struct ToggleCursor;
+
+#[derive(Event)]
+struct ResetScales;
+
+#[derive(Event)]
+struct FitToScreen;
 
 #[derive(Event)]
 struct ResetVisibilityEvent;
@@ -375,11 +385,13 @@ fn ui_example(
     mut layout_state: ResMut<GridLayoutState>,
     mut ongoing_edit: Local<ConfigShortcutAsString>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
-    mut ui_state: ResMut<UiState>,
+    ui_state: ResMut<UiState>,
     mut ui_panel_visible: Local<bool>,
     mut global_scale: ResMut<GlobalScale>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
     mut cursor_evw: EventWriter<ToggleCursor>,
+    mut reset_scales_evw: EventWriter<ResetScales>,
+    mut fit_to_screen_evw: EventWriter<FitToScreen>,
 ) {
     if ui_state.visible {
         egui::TopBottomPanel::bottom("wrap_app_top_bar").show(contexts.ctx_mut(), |ui| {
@@ -400,6 +412,18 @@ fn ui_example(
                     {
                         global_scale.0 = 2f32.powf(scale);
                     }
+
+                    if ui.button("1:1").on_hover_text("Reset All Zoom").clicked() {
+                        reset_scales_evw.send(ResetScales);
+                    }
+
+                    if ui.button("Fit").on_hover_text("Fit to Screen").clicked() {
+                        fit_to_screen_evw.send(FitToScreen);
+                    }
+
+                    if ui.button("\u{26F6}").on_hover_text("Save Crop").clicked() {
+                    }
+
                     ui.separator();
                     for i in 0..10 {
                         let mut state = i == layout_state.index;
@@ -435,7 +459,10 @@ fn ui_example(
                 .show(contexts.ctx_mut(), |ui| {
                     ui.vertical_centered(|ui| {
                         ui.heading("Settings");
-                        ui.hyperlink_to("Source Code", "https://github.com/edmBernard/image-viewer-rs");
+                        ui.hyperlink_to(
+                            format!("{} Source Code", egui::special_emojis::GITHUB),
+                            "https://github.com/edmBernard/image-viewer-rs",
+                        );
                     });
                     ui.separator();
                     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -581,8 +608,8 @@ fn on_load_image(
 fn on_image_loaded(
     config: Res<Config>,
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
     mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
+    mut fit_to_screen_evw: EventWriter<FitToScreen>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
     mut image_loaded: Local<usize>,
@@ -598,7 +625,6 @@ fn on_image_loaded(
                 commands.entity(entity).despawn();
             }
         }
-        println!("image loaded count : {}", *image_loaded);
         let visibility = match layout_state.layout {
             GridLayout::Stack => {
                 if *image_loaded != layout_state.index {
@@ -653,7 +679,7 @@ fn on_image_loaded(
         ));
 
         reset_vis_evw.send(ResetVisibilityEvent);
-        move_image_evw.send(MoveImageEvent);
+        fit_to_screen_evw.send(FitToScreen);
 
         let mut visibility = help_query.single_mut();
         *visibility = Visibility::Hidden;
@@ -1114,6 +1140,55 @@ fn toggle_cursor(
             for entity in &cursor_query {
                 commands.entity(entity).despawn_recursive();
             }
+        }
+    }
+}
+
+fn reset_scales(
+    mut reset_evr: EventReader<ResetScales>,
+    mut global_scale: ResMut<GlobalScale>,
+    mut sprite_query: Query<(&mut Scale, &mut Position), With<MyImage>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+) {
+    for _ev in reset_evr.read() {
+        global_scale.0 = 1.;
+        for (mut scale, mut position) in &mut sprite_query {
+            position.0 = Vec2::ZERO;
+            scale.0 = 1.0;
+        }
+    }
+}
+
+fn fit_to_screen(
+    mut fit_to_screen_evr: EventReader<FitToScreen>,
+    windows: Query<&Window>,
+    assets: Res<Assets<Image>>,
+    mut global_scale: ResMut<GlobalScale>,
+    mut sprite_query: Query<(&Id, &Handle<Image>, &mut Scale, &mut Position), With<MyImage>>,
+    layout_state: Res<GridLayoutState>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+) {
+    for _ev in fit_to_screen_evr.read() {
+        let window = windows.single();
+        let num_images = sprite_query.iter().count();
+
+        for (id, image_handle, mut scale, mut position) in &mut sprite_query {
+            let Some(image) = assets.get(image_handle) else {
+                continue;
+            };
+            let image_size = image.size().as_vec2();
+
+            let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+
+            let factor = cell_size / image_size;
+
+            if id.0 == 0 {
+                global_scale.0 = f32::min(factor.x, factor.y);
+                scale.0 = 1.0;
+            } else {
+                scale.0 = f32::min(factor.x, factor.y) / global_scale.0;
+            }
+            position.0 = Vec2::ZERO;
         }
     }
 }
