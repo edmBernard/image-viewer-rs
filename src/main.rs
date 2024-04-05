@@ -40,7 +40,7 @@ const HELP_STRING: &'static str = "Keyboard Shortcut:
     Ctrl/Cmd + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
     Z + Right/Left clic: zoom in/out the hovered image only
     C: Toggle multi cursor
-    P: Save image to disk with the displayed crop (prefixed by cr_)
+    P: Save image to disk with the displayed crop (suffixed by _crop)
     H: Toggle Interface
 
     Drag and Drop image from files explorer.
@@ -473,7 +473,7 @@ fn ui_example(
                     }
 
                     ui.separator();
-                    if ui.button("\u{26F6}").on_hover_text("Save Crop").clicked() {
+                    if ui.button("\u{26F6}").on_hover_text("Save crops next to original images suffixed with _crop").clicked() {
                         save_cropped_evw.send(SaveCropped);
                     }
                 },
