@@ -20,6 +20,7 @@ use home;
 use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::Deserialize;
 use serde_json;
+use std::io::Seek;
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -554,6 +555,10 @@ fn ui_example(
                                 &mut ongoing_edit.switch_layout,
                             );
                         });
+
+                        if ui.button("Save config").on_hover_text("Path").clicked() {
+                        }
+
                     });
                 });
         }
@@ -566,16 +571,41 @@ fn on_load_image(
     mut images: ResMut<Assets<Image>>,
 ) {
     for ev in load_evr.read() {
-        let Some(f) = File::open(&ev.path).ok() else {
+        let Some(mut file) = File::open(&ev.path).ok() else {
             println!("Failed to open file {}", ev.path);
             continue;
         };
+
+        let mut buf = BufReader::new(&file);
+
+        // Read Exif
+        let exifreader = exif::Reader::new();
+
+        match exifreader.read_from_container(&mut buf) {
+            Ok(exif) => {
+                println!("Get Exif data");
+                for f in exif.fields() {
+                    println!("{} {} {}",
+                    f.tag, f.ifd_num, f.display_value().with_unit(&exif));
+                }
+            },
+            Err(message) => {
+                println!("{message}");
+                continue;
+            }
+        }
+
+        // Read Pixels
+        let Ok(_) = file.seek(std::io::SeekFrom::Start(0)) else {
+            continue;
+        };
+        let buf = BufReader::new(file);
+
         let Some(format) = ImageFormat::from_path(&ev.path).ok() else {
             println!("Failed to deduce image format from path");
             continue;
         };
 
-        let buf = BufReader::new(f);
         let mut reader = image::io::Reader::with_format(buf, format);
 
         // Remove the memory limit on image size we can read
