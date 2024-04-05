@@ -46,6 +46,12 @@ const HELP_STRING: &'static str = "Keyboard Shortcut:
     Drag and Drop image from files explorer.
 ";
 
+#[derive(States, Debug, Clone, PartialEq, Eq, Hash)]
+enum MyAppState {
+    Working,
+    EditShortCut,
+}
+
 // -----------------------------
 // Config Struct
 #[derive(Deserialize, Debug)]
@@ -146,6 +152,7 @@ fn main() -> Result<()> {
                 .set(ImagePlugin::default_nearest()),
             EguiPlugin,
         ))
+        .insert_state(MyAppState::Working)
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState { visible: true })
         .insert_resource(config_data)
@@ -171,7 +178,7 @@ fn main() -> Result<()> {
         .add_event::<ResetScales>()
         .add_event::<FitToScreen>()
         .add_systems(Update, ui_example)
-        .add_systems(Update, change_layout)
+        .add_systems(Update, key_change_layout.run_if(in_state(MyAppState::Working)))
         .add_systems(Update, change_layout_on_click)
         .add_systems(Update, change_global_zoom)
         .add_systems(Update, change_zoom_individually)
@@ -180,7 +187,7 @@ fn main() -> Result<()> {
         .add_systems(Update, cursor_move)
         .add_systems(Update, file_drop)
         .add_systems(Update, change_top_image)
-        .add_systems(Update, change_rotation_image)
+        .add_systems(Update, change_rotation_image.run_if(in_state(MyAppState::Working)))
         .add_systems(Update, on_reset_visibility)
         .add_systems(Update, on_resize_system)
         .add_systems(Update, on_image_loaded)
@@ -189,11 +196,11 @@ fn main() -> Result<()> {
         .add_systems(Update, on_move_image_title)
         .add_systems(Update, on_load_image)
         .add_systems(Update, toggle_help)
-        .add_systems(Update, key_toggle_cursor)
+        .add_systems(Update, key_toggle_cursor.run_if(in_state(MyAppState::Working)))
         .add_systems(Update, toggle_cursor)
         .add_systems(Update, reset_scales)
         .add_systems(Update, fit_to_screen)
-        .add_systems(Update, key_save_cropped)
+        .add_systems(Update, key_save_cropped.run_if(in_state(MyAppState::Working)))
         .add_systems(Update, save_cropped)
         .run();
 
@@ -359,7 +366,13 @@ fn configure_visuals(mut egui_ctx: EguiContexts) {
     egui_ctx.ctx_mut().set_visuals(egui::Visuals { ..Default::default() });
 }
 
-fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, ongoing: &mut Option<String>) {
+fn keycode_dropdown(
+    ui: &mut egui::Ui,
+    next_state: &mut ResMut<NextState<MyAppState>>,
+    label: &str,
+    current_key: &mut KeyCode,
+    ongoing: &mut Option<String>,
+) {
     ui.horizontal(|ui| {
         ui.label(label);
 
@@ -374,7 +387,13 @@ fn keycode_dropdown(ui: &mut egui::Ui, label: &str, current_key: &mut KeyCode, o
                 String::from(&key_previous[1..string_len - 1])
             }
         };
-        ui.text_edit_singleline(&mut key_string);
+        let response = ui.text_edit_singleline(&mut key_string);
+        if response.gained_focus() {
+            next_state.set(MyAppState::EditShortCut);
+        }
+        if response.lost_focus() {
+            next_state.set(MyAppState::Working);
+        };
 
         let key_json = format!("\"{}\"", key_string);
         if let Ok(key) = serde_json::from_str::<KeyCode>(&key_json) {
@@ -398,6 +417,7 @@ fn ui_example(
     mut save_cropped_evw: EventWriter<SaveCropped>,
     mut reset_scales_evw: EventWriter<ResetScales>,
     mut fit_to_screen_evw: EventWriter<FitToScreen>,
+    mut next_state: ResMut<NextState<MyAppState>>,
 ) {
     if ui_state.visible {
         egui::TopBottomPanel::bottom("wrap_app_top_bar").show(contexts.ctx_mut(), |ui| {
@@ -456,7 +476,6 @@ fn ui_example(
                     if ui.button("\u{26F6}").on_hover_text("Save Crop").clicked() {
                         save_cropped_evw.send(SaveCropped);
                     }
-
                 },
             );
         });
@@ -501,30 +520,35 @@ fn ui_example(
                         CollapsingHeader::new("Short Cut").default_open(true).show(ui, |ui| {
                             keycode_dropdown(
                                 ui,
+                                &mut next_state,
                                 "Save Crop:",
                                 &mut config.shortcut.save_crop_image,
                                 &mut ongoing_edit.save_crop_image,
                             );
                             keycode_dropdown(
                                 ui,
+                                &mut next_state,
                                 "Local Zoom Modifier:",
                                 &mut config.shortcut.local_zoom_modifier,
                                 &mut ongoing_edit.local_zoom_modifier,
                             );
                             keycode_dropdown(
                                 ui,
+                                &mut next_state,
                                 "Change Cursor:",
                                 &mut config.shortcut.switch_cursor,
                                 &mut ongoing_edit.switch_cursor,
                             );
                             keycode_dropdown(
                                 ui,
+                                &mut next_state,
                                 "Rotate:",
                                 &mut config.shortcut.rotate_images,
                                 &mut ongoing_edit.rotate_images,
                             );
                             keycode_dropdown(
                                 ui,
+                                &mut next_state,
                                 "Change Layout:",
                                 &mut config.shortcut.switch_layout,
                                 &mut ongoing_edit.switch_layout,
@@ -832,7 +856,7 @@ fn on_reset_visibility(
     }
 }
 
-fn change_layout(
+fn key_change_layout(
     config: Res<Config>,
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
@@ -1199,8 +1223,11 @@ fn fit_to_screen(
     }
 }
 
-
-fn key_save_cropped(keys: Res<ButtonInput<KeyCode>>, config: Res<Config>, mut save_scropped_evw: EventWriter<SaveCropped>) {
+fn key_save_cropped(
+    keys: Res<ButtonInput<KeyCode>>,
+    config: Res<Config>,
+    mut save_scropped_evw: EventWriter<SaveCropped>,
+) {
     if keys.just_pressed(config.shortcut.save_crop_image) {
         println!("Save crop key pressed");
         save_scropped_evw.send(SaveCropped);
