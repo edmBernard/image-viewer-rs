@@ -137,7 +137,7 @@ fn main() -> Result<()> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
-                        resolution: [700., 300.].into(),
+                        resolution: [800., 300.].into(),
                         present_mode: PresentMode::AutoVsync,
                         ..default()
                     }),
@@ -166,6 +166,7 @@ fn main() -> Result<()> {
         .add_event::<NewImageLoadedEvent>()
         .add_event::<MoveImageEvent>()
         .add_event::<ToggleCursor>()
+        .add_event::<SaveCropped>()
         .add_event::<ResetVisibilityEvent>()
         .add_event::<ResetScales>()
         .add_event::<FitToScreen>()
@@ -192,6 +193,7 @@ fn main() -> Result<()> {
         .add_systems(Update, toggle_cursor)
         .add_systems(Update, reset_scales)
         .add_systems(Update, fit_to_screen)
+        .add_systems(Update, key_save_cropped)
         .add_systems(Update, save_cropped)
         .run();
 
@@ -275,6 +277,9 @@ struct MoveImageEvent;
 
 #[derive(Event)]
 struct ToggleCursor;
+
+#[derive(Event)]
+struct SaveCropped;
 
 #[derive(Event)]
 struct ResetScales;
@@ -390,6 +395,7 @@ fn ui_example(
     mut global_scale: ResMut<GlobalScale>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
     mut cursor_evw: EventWriter<ToggleCursor>,
+    mut save_cropped_evw: EventWriter<SaveCropped>,
     mut reset_scales_evw: EventWriter<ResetScales>,
     mut fit_to_screen_evw: EventWriter<FitToScreen>,
 ) {
@@ -421,10 +427,6 @@ fn ui_example(
                         fit_to_screen_evw.send(FitToScreen);
                     }
 
-                    if ui.button("\u{26F6}").on_hover_text("Save Crop").clicked() {
-                    }
-
-                    ui.separator();
                     for i in 0..10 {
                         let mut state = i == layout_state.index;
                         if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
@@ -449,6 +451,12 @@ fn ui_example(
                     if elem1 || elem2 || elem3 || elem4 {
                         reset_vix_evw.send(ResetVisibilityEvent);
                     }
+
+                    ui.separator();
+                    if ui.button("\u{26F6}").on_hover_text("Save Crop").clicked() {
+                        save_cropped_evw.send(SaveCropped);
+                    }
+
                 },
             );
         });
@@ -1148,7 +1156,6 @@ fn reset_scales(
     mut reset_evr: EventReader<ResetScales>,
     mut global_scale: ResMut<GlobalScale>,
     mut sprite_query: Query<(&mut Scale, &mut Position), With<MyImage>>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
 ) {
     for _ev in reset_evr.read() {
         global_scale.0 = 1.;
@@ -1166,7 +1173,6 @@ fn fit_to_screen(
     mut global_scale: ResMut<GlobalScale>,
     mut sprite_query: Query<(&Id, &Handle<Image>, &mut Scale, &mut Position), With<MyImage>>,
     layout_state: Res<GridLayoutState>,
-    mut move_image_evw: EventWriter<MoveImageEvent>,
 ) {
     for _ev in fit_to_screen_evr.read() {
         let window = windows.single();
@@ -1193,12 +1199,19 @@ fn fit_to_screen(
     }
 }
 
+
+fn key_save_cropped(keys: Res<ButtonInput<KeyCode>>, config: Res<Config>, mut save_scropped_evw: EventWriter<SaveCropped>) {
+    if keys.just_pressed(config.shortcut.save_crop_image) {
+        println!("Save crop key pressed");
+        save_scropped_evw.send(SaveCropped);
+    }
+}
+
 fn save_cropped(
-    config: Res<Config>,
-    keys: Res<ButtonInput<KeyCode>>,
+    mut save_scropped_evr: EventReader<SaveCropped>,
     image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
 ) {
-    if keys.just_pressed(config.shortcut.save_crop_image) {
+    for _ev in save_scropped_evr.read() {
         for (path, sprite) in &image_query {
             // Get Input image
             let input_path = Path::new(&path.0);
@@ -1226,13 +1239,21 @@ fn save_cropped(
             let Some(parent) = input_path.parent() else {
                 continue;
             };
-            let Some(filename) = input_path.file_name() else {
+            let Some(filename) = input_path.file_stem() else {
                 continue;
             };
+            let Some(extension) = input_path.extension() else {
+                continue;
+            };
+
             let Some(filename_as_str) = filename.to_str() else {
                 continue;
             };
-            let output_path = parent.join(String::from("cr_") + filename_as_str);
+            let Some(extension_as_str) = extension.to_str() else {
+                continue;
+            };
+
+            let output_path = parent.join(filename_as_str.to_owned() + &String::from("_crop.") + extension_as_str);
 
             let Some(f_out) = File::create(&output_path).ok() else {
                 println!("Failed to create file {}", &output_path.display());
