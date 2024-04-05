@@ -187,7 +187,7 @@ fn main() -> Result<()> {
         .add_systems(Update, cursor_move)
         .add_systems(Update, file_drop)
         .add_systems(Update, change_top_image)
-        .add_systems(Update, change_rotation_image.run_if(in_state(MyAppState::Working)))
+        .add_systems(Update, change_image_rotation.run_if(in_state(MyAppState::Working)))
         .add_systems(Update, on_reset_visibility)
         .add_systems(Update, on_resize_system)
         .add_systems(Update, on_image_loaded)
@@ -586,54 +586,41 @@ fn on_load_image(
             continue;
         };
 
-        match image.color() {
+        let loaded_image = match image.color() {
             ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
-                let new_image = Image::from_dynamic(
+                Image::from_dynamic(
                     image,
                     true,
                     RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                );
-                let handle = images.add(new_image);
-                loaded_evw.send(NewImageLoadedEvent {
-                    handle: handle,
-                    path: ev.path.clone(),
-                    index: ev.index,
-                    count: ev.count,
-                });
+                )
             }
             ColorType::Rgb16 | ColorType::Rgba16 => {
-                let new_image = Image::from_dynamic(
+                Image::from_dynamic(
                     image,
                     true,
                     RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                );
-                let handle = images.add(new_image);
-                loaded_evw.send(NewImageLoadedEvent {
-                    handle: handle,
-                    path: ev.path.clone(),
-                    index: ev.index,
-                    count: ev.count,
-                });
+                )
             }
             ColorType::L16 => {
                 let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
-                let new_image = Image::from_dynamic(
+                Image::from_dynamic(
                     image_rgb16,
                     true,
                     RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                );
-                let handle = images.add(new_image);
-                loaded_evw.send(NewImageLoadedEvent {
-                    handle: handle,
-                    path: ev.path.clone(),
-                    index: ev.index,
-                    count: ev.count,
-                });
+                )
             }
             _ => {
-                println!("Unsupported image type : image.color(): {:?}", image.color())
+                println!("Unsupported image type : image.color(): {:?}", image.color());
+                continue;
             }
-        }
+        };
+        let handle = images.add(loaded_image);
+        loaded_evw.send(NewImageLoadedEvent {
+            handle: handle,
+            path: ev.path.clone(),
+            index: ev.index,
+            count: ev.count,
+        });
     }
 }
 
@@ -958,7 +945,7 @@ fn change_top_image(
     move_image_evw.send(MoveImageEvent);
 }
 
-fn change_rotation_image(
+fn change_image_rotation(
     config: Res<Config>,
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
@@ -1229,9 +1216,16 @@ fn key_save_cropped(
     mut save_scropped_evw: EventWriter<SaveCropped>,
 ) {
     if keys.just_pressed(config.shortcut.save_crop_image) {
-        println!("Save crop key pressed");
         save_scropped_evw.send(SaveCropped);
     }
+}
+
+// insert a suffix to given filename
+fn insert_suffix(path : &Path, suffix: &str) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    let filename = path.file_stem()?.to_str()?;
+    let extension = path.extension()?.to_str()?;
+    Some(parent.join(filename.to_owned() + suffix + "." + extension))
 }
 
 fn save_cropped(
@@ -1263,24 +1257,10 @@ fn save_cropped(
             };
 
             // Get Output buffer
-            let Some(parent) = input_path.parent() else {
+            let Some(output_path) = insert_suffix(input_path, "_crop") else {
+                println!("Failed to create output filename");
                 continue;
             };
-            let Some(filename) = input_path.file_stem() else {
-                continue;
-            };
-            let Some(extension) = input_path.extension() else {
-                continue;
-            };
-
-            let Some(filename_as_str) = filename.to_str() else {
-                continue;
-            };
-            let Some(extension_as_str) = extension.to_str() else {
-                continue;
-            };
-
-            let output_path = parent.join(filename_as_str.to_owned() + &String::from("_crop.") + extension_as_str);
 
             let Some(f_out) = File::create(&output_path).ok() else {
                 println!("Failed to create file {}", &output_path.display());
