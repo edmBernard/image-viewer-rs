@@ -12,14 +12,12 @@ use std::time::{Duration, Instant};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
-use bevy::window::{PresentMode, Window, WindowResized};
+use bevy::window::{PresentMode, WindowResized};
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use clap::Parser;
-use home;
 use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::Deserialize;
-use serde_json;
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -65,12 +63,12 @@ struct ConfigShortcut {
 
 // Used to store temporary edition during manual edit
 #[derive(Default)]
-struct ConfigShortcutAsString {
-    save_crop_image: Option<String>,
-    local_zoom_modifier: Option<String>,
-    switch_cursor: Option<String>,
-    switch_layout: Option<String>,
-    rotate_images: Option<String>,
+struct ConfigShortcutAsBool {
+    save_crop_image: bool,
+    local_zoom_modifier: bool,
+    switch_cursor: bool,
+    switch_layout: bool,
+    rotate_images: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -158,6 +156,7 @@ fn main() -> Result<()> {
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(MultiCursorEnabled(false))
+        .insert_resource(RecordedPressedKey(None))
         .insert_resource(GridLayoutState {
             layout: GridLayout::Grid,
             index: 0,
@@ -177,31 +176,51 @@ fn main() -> Result<()> {
         .add_event::<ResetVisibilityEvent>()
         .add_event::<ResetScales>()
         .add_event::<FitToScreen>()
-        .add_systems(Update, ui_example)
-        .add_systems(Update, key_change_layout.run_if(in_state(MyAppState::Working)))
-        .add_systems(Update, change_layout_on_click)
-        .add_systems(Update, change_global_zoom)
-        .add_systems(Update, change_zoom_individually)
-        .add_systems(Update, scroll_events)
-        .add_systems(Update, mouse_button_input)
-        .add_systems(Update, cursor_move)
-        .add_systems(Update, file_drop)
-        .add_systems(Update, change_top_image)
-        .add_systems(Update, change_image_rotation.run_if(in_state(MyAppState::Working)))
-        .add_systems(Update, on_reset_visibility)
-        .add_systems(Update, on_resize_system)
-        .add_systems(Update, on_image_loaded)
-        .add_systems(Update, on_move_cursor)
-        .add_systems(Update, on_move_image)
-        .add_systems(Update, on_move_image_title)
-        .add_systems(Update, on_load_image)
-        .add_systems(Update, toggle_help)
-        .add_systems(Update, key_toggle_cursor.run_if(in_state(MyAppState::Working)))
-        .add_systems(Update, toggle_cursor)
-        .add_systems(Update, reset_scales)
-        .add_systems(Update, fit_to_screen)
-        .add_systems(Update, key_save_cropped.run_if(in_state(MyAppState::Working)))
-        .add_systems(Update, save_cropped)
+        .add_systems(
+            Update,
+            (
+                ui_main,
+                key_change_layout,
+                change_layout_on_click,
+                change_global_zoom,
+                change_global_zoom,
+                change_zoom_individually,
+                scroll_events,
+                mouse_button_input,
+                cursor_move,
+                file_drop,
+                change_top_image,
+                change_image_rotation,
+                on_reset_visibility,
+                on_resize_system,
+                on_image_loaded,
+                on_move_cursor,
+                on_move_image,
+                on_move_image_title,
+                on_load_image,
+                toggle_help,
+            )
+            .run_if(in_state(MyAppState::Working)),
+        )
+        // Bevy doesn't allow more than 20 systems in the declaration of anonymous system set
+        // https://docs.rs/bevy/latest/bevy/ecs/schedule/trait.IntoSystemConfigs.html#foreign-impls
+        // Seriously :face_palm: Is it Bevy or Rust fault ?
+        .add_systems(
+            Update,
+            (
+                key_toggle_cursor,
+                toggle_cursor,
+                reset_scales,
+                fit_to_screen,
+                key_save_cropped,
+                save_cropped,
+            )
+                .run_if(in_state(MyAppState::Working)),
+        )
+        .add_systems(
+            Update,
+            (record_pressed_key, ui_edit_short_cut).run_if(in_state(MyAppState::EditShortCut)),
+        )
         .run();
 
     Ok(())
@@ -246,6 +265,9 @@ struct FontHandle(Handle<Font>);
 
 #[derive(Resource)]
 struct InitialImagesFilename(Vec<String>);
+
+#[derive(Resource, Debug)]
+struct RecordedPressedKey(Option<KeyCode>);
 
 // -----------------------------
 // Components
@@ -371,43 +393,33 @@ fn keycode_dropdown(
     next_state: &mut ResMut<NextState<MyAppState>>,
     label: &str,
     current_key: &mut KeyCode,
-    ongoing: &mut Option<String>,
+    ongoing: &mut bool,
+    recorded_key: &mut ResMut<RecordedPressedKey>,
 ) {
     ui.horizontal(|ui| {
         ui.label(label);
 
-        let Ok(key_previous) = serde_json::to_string(&current_key) else {
-            panic!("Should not happend: Can't convert KeyCode to string");
-        };
-        let mut key_string = match ongoing {
-            Some(value) => value.clone(),
-            None => {
-                let string_len = key_previous.len();
-                // strip quote
-                String::from(&key_previous[1..string_len - 1])
+        let key_previous = format!("{current_key:?}");
+        let response = ui.toggle_value(ongoing, &key_previous);
+        if response.changed() {
+            if *ongoing {
+                next_state.set(MyAppState::EditShortCut);
             }
-        };
-        let response = ui.text_edit_singleline(&mut key_string);
-        if response.gained_focus() {
-            next_state.set(MyAppState::EditShortCut);
         }
-        if response.lost_focus() {
-            next_state.set(MyAppState::Working);
-        };
-
-        let key_json = format!("\"{}\"", key_string);
-        if let Ok(key) = serde_json::from_str::<KeyCode>(&key_json) {
-            *current_key = key;
+        if *ongoing && recorded_key.0.is_some() {
+            *ongoing = false;
+            *current_key = recorded_key.0.unwrap();
+            recorded_key.0 = None;
         }
-        *ongoing = Some(key_string);
     });
 }
 
-fn ui_example(
+fn ui_main(
     mut contexts: EguiContexts,
     mut config: ResMut<Config>,
     mut layout_state: ResMut<GridLayoutState>,
-    mut ongoing_edit: Local<ConfigShortcutAsString>,
+    mut ongoing_edit: Local<ConfigShortcutAsBool>,
+    mut recorded_key: ResMut<RecordedPressedKey>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
     ui_state: ResMut<UiState>,
     mut ui_panel_visible: Local<bool>,
@@ -473,7 +485,11 @@ fn ui_example(
                     }
 
                     ui.separator();
-                    if ui.button("\u{26F6}").on_hover_text("Save crops next to original images suffixed with _crop").clicked() {
+                    if ui
+                        .button("\u{26F6}")
+                        .on_hover_text("Save crops next to original images suffixed with _crop")
+                        .clicked()
+                    {
                         save_cropped_evw.send(SaveCropped);
                     }
                 },
@@ -524,6 +540,7 @@ fn ui_example(
                                 "Save Crop:",
                                 &mut config.shortcut.save_crop_image,
                                 &mut ongoing_edit.save_crop_image,
+                                &mut recorded_key,
                             );
                             keycode_dropdown(
                                 ui,
@@ -531,6 +548,7 @@ fn ui_example(
                                 "Local Zoom Modifier:",
                                 &mut config.shortcut.local_zoom_modifier,
                                 &mut ongoing_edit.local_zoom_modifier,
+                                &mut recorded_key,
                             );
                             keycode_dropdown(
                                 ui,
@@ -538,6 +556,7 @@ fn ui_example(
                                 "Change Cursor:",
                                 &mut config.shortcut.switch_cursor,
                                 &mut ongoing_edit.switch_cursor,
+                                &mut recorded_key,
                             );
                             keycode_dropdown(
                                 ui,
@@ -545,6 +564,7 @@ fn ui_example(
                                 "Rotate:",
                                 &mut config.shortcut.rotate_images,
                                 &mut ongoing_edit.rotate_images,
+                                &mut recorded_key,
                             );
                             keycode_dropdown(
                                 ui,
@@ -552,12 +572,24 @@ fn ui_example(
                                 "Change Layout:",
                                 &mut config.shortcut.switch_layout,
                                 &mut ongoing_edit.switch_layout,
+                                &mut recorded_key,
                             );
                         });
                     });
                 });
         }
     }
+}
+
+fn ui_edit_short_cut(mut contexts: EguiContexts) {
+    egui::CentralPanel::default().show(contexts.ctx_mut(), |ui| {
+        ui.with_layout(
+            egui::Layout::top_down_justified(egui::Align::Center),
+            |ui| {
+                ui.heading("Press short cut key");
+            },
+        )
+    });
 }
 
 fn on_load_image(
@@ -587,20 +619,16 @@ fn on_load_image(
         };
 
         let loaded_image = match image.color() {
-            ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
-                Image::from_dynamic(
-                    image,
-                    true,
-                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                )
-            }
-            ColorType::Rgb16 | ColorType::Rgba16 => {
-                Image::from_dynamic(
-                    image,
-                    true,
-                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                )
-            }
+            ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => Image::from_dynamic(
+                image,
+                true,
+                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+            ),
+            ColorType::Rgb16 | ColorType::Rgba16 => Image::from_dynamic(
+                image,
+                true,
+                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+            ),
             ColorType::L16 => {
                 let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
                 Image::from_dynamic(
@@ -1220,8 +1248,24 @@ fn key_save_cropped(
     }
 }
 
+fn record_pressed_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut recorded_key: ResMut<RecordedPressedKey>,
+    mut next_state: ResMut<NextState<MyAppState>>,
+) {
+    let mut count = false;
+    for k in keys.get_pressed() {
+        *recorded_key = RecordedPressedKey(Some(*k));
+        count = true;
+    }
+    if !count && recorded_key.0.is_some() {
+        // *recorded_key = RecordedPressedKey(None);
+        next_state.set(MyAppState::Working);
+    }
+}
+
 // insert a suffix to given filename
-fn insert_suffix(path : &Path, suffix: &str) -> Option<std::path::PathBuf> {
+fn insert_suffix(path: &Path, suffix: &str) -> Option<std::path::PathBuf> {
     let parent = path.parent()?;
     let filename = path.file_stem()?.to_str()?;
     let extension = path.extension()?.to_str()?;
