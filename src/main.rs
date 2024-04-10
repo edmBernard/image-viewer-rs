@@ -176,6 +176,7 @@ fn main() -> Result<()> {
         .add_event::<ResetVisibilityEvent>()
         .add_event::<ResetScales>()
         .add_event::<FitToScreen>()
+        .add_event::<ChangeTitleStyleEvent>()
         .add_systems(
             Update,
             (
@@ -214,6 +215,7 @@ fn main() -> Result<()> {
                 fit_to_screen,
                 key_save_cropped,
                 save_cropped,
+                change_image_title_style,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -303,6 +305,9 @@ struct MyHelp;
 // Events
 #[derive(Event)]
 struct MoveImageEvent;
+
+#[derive(Event)]
+struct ChangeTitleStyleEvent;
 
 #[derive(Event)]
 struct ToggleCursor;
@@ -429,6 +434,7 @@ fn ui_main(
     mut save_cropped_evw: EventWriter<SaveCropped>,
     mut reset_scales_evw: EventWriter<ResetScales>,
     mut fit_to_screen_evw: EventWriter<FitToScreen>,
+    mut change_title_style_evw: EventWriter<ChangeTitleStyleEvent>,
     mut next_state: ResMut<NextState<MyAppState>>,
 ) {
     if ui_state.visible {
@@ -516,15 +522,18 @@ fn ui_main(
                         };
 
                         CollapsingHeader::new("Style").default_open(true).show(ui, |ui| {
-                            ui.label("New style is applied when new images are loaded");
                             ui.horizontal(|ui| {
                                 ui.label("Font Size:");
-                                ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0));
+                                if ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0)).changed() {
+                                    change_title_style_evw.send(ChangeTitleStyleEvent);
+                                }
                             });
                             let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
                             ui.horizontal(|ui| {
                                 ui.label("Font Color:");
-                                ui.color_edit_button_rgba_unmultiplied(&mut color_vec);
+                                if ui.color_edit_button_rgba_unmultiplied(&mut color_vec).changed() {
+                                    change_title_style_evw.send(ChangeTitleStyleEvent);
+                                }
                                 ui.label(format!(
                                     "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
                                     color_vec[0], color_vec[1], color_vec[2], color_vec[3],
@@ -818,6 +827,24 @@ fn on_move_image_title(
         let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
         style.top = Val::Px(cell_offset.y + 2.);
         style.left = Val::Px(cell_offset.x + 5.);
+    }
+}
+
+fn change_image_title_style(
+    mut change_style_evr: EventReader<ChangeTitleStyleEvent>,
+    config: Res<Config>,
+    mut text_query: Query<&mut Text, With<MyText>>,
+) {
+    if change_style_evr.is_empty() {
+        return;
+    }
+    change_style_evr.clear();
+
+    for mut title in &mut text_query {
+        for text in &mut title.sections {
+            text.style.color = config.text.font_color;
+            text.style.font_size = config.text.font_size;
+        }
     }
 }
 
