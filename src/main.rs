@@ -146,7 +146,7 @@ fn main() -> Result<()> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Image Viewer 3000".to_string(),
-                        resolution: [800., 300.].into(),
+                        resolution: [800., 350.].into(),
                         present_mode: PresentMode::AutoVsync,
                         ..default()
                     }),
@@ -1156,6 +1156,7 @@ fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &
 fn toggle_help(keys: Res<ButtonInput<KeyCode>>, mut ui_state: ResMut<UiState>) {
     if keys.just_pressed(KeyCode::KeyH) {
         ui_state.visible = !ui_state.visible;
+        ui_state.settings_panel_visible = false;
     }
 }
 

@@ -39,7 +39,6 @@ We can quarter turn image by pressing `R` keyboard key.
 
 We use the crate [image-rs](https://crates.io/crates/image), so be support almost the same number of format with some exception.
 As image are uploaded as texture, the image should be compatible with [wgpu](https://crates.io/crates/wgpu) texture.
-For example currently 16u images are supported by converting them 8u.
 
 ## Config
 
