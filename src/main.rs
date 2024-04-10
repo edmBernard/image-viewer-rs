@@ -4,6 +4,7 @@
 use std::f32::consts::{PI, TAU};
 use std::fs::canonicalize;
 use std::fs::File;
+use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::Path;
@@ -17,7 +18,7 @@ use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use clap::Parser;
 use image::{ColorType, DynamicImage, ImageFormat, SubImage};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
 type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
@@ -52,7 +53,7 @@ enum MyAppState {
 
 // -----------------------------
 // Config Struct
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigShortcut {
     save_crop_image: KeyCode,
     local_zoom_modifier: KeyCode,
@@ -71,23 +72,23 @@ struct ConfigShortcutAsBool {
     rotate_images: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigText {
     font_size: f32,
     font_color: Color,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigHDR {
     enabled: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigMisc {
     zoom_on_scroll_enabled: bool,
 }
 
-#[derive(Deserialize, Debug, Resource)]
+#[derive(Serialize, Deserialize, Debug, Resource)]
 struct Config {
     text: ConfigText,
     shortcut: ConfigShortcut,
@@ -116,7 +117,11 @@ fn main() -> Result<()> {
             break 'block None;
         };
 
-        toml::from_str(&config_str)?
+        let Ok(config) = toml::from_str(&config_str) else {
+            break 'block None;
+        };
+
+        config
     };
 
     let config_data = match user_config_data {
@@ -152,7 +157,7 @@ fn main() -> Result<()> {
         ))
         .insert_state(MyAppState::Working)
         .insert_resource(InitialImagesFilename(images_filename))
-        .insert_resource(UiState { visible: true })
+        .insert_resource(UiState { visible: true, settings_panel_visible: false})
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(MultiCursorEnabled(false))
@@ -177,13 +182,14 @@ fn main() -> Result<()> {
         .add_event::<ResetScales>()
         .add_event::<FitToScreen>()
         .add_event::<ChangeTitleStyleEvent>()
+        .add_event::<SaveSettingsEvent>()
         .add_systems(
             Update,
             (
-                ui_main,
+                ui_bottom_menu,
+                ui_settings_menu.after(ui_bottom_menu),
                 key_change_layout,
                 change_layout_on_click,
-                change_global_zoom,
                 change_global_zoom,
                 change_zoom_individually,
                 scroll_events,
@@ -201,7 +207,7 @@ fn main() -> Result<()> {
                 on_load_image,
                 toggle_help,
             )
-            .run_if(in_state(MyAppState::Working)),
+                .run_if(in_state(MyAppState::Working)),
         )
         // Bevy doesn't allow more than 20 systems in the declaration of anonymous system set
         // https://docs.rs/bevy/latest/bevy/ecs/schedule/trait.IntoSystemConfigs.html#foreign-impls
@@ -215,6 +221,7 @@ fn main() -> Result<()> {
                 fit_to_screen,
                 key_save_cropped,
                 save_cropped,
+                save_settings,
                 change_image_title_style,
             )
                 .run_if(in_state(MyAppState::Working)),
@@ -236,6 +243,7 @@ struct MultiCursorEnabled(bool);
 #[derive(Resource)]
 struct UiState {
     visible: bool,
+    settings_panel_visible: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -308,6 +316,9 @@ struct MoveImageEvent;
 
 #[derive(Event)]
 struct ChangeTitleStyleEvent;
+
+#[derive(Event)]
+struct SaveSettingsEvent;
 
 #[derive(Event)]
 struct ToggleCursor;
@@ -419,23 +430,15 @@ fn keycode_dropdown(
     });
 }
 
-fn ui_main(
+fn ui_bottom_menu(
     mut contexts: EguiContexts,
-    mut config: ResMut<Config>,
     mut layout_state: ResMut<GridLayoutState>,
-    mut ongoing_edit: Local<ConfigShortcutAsBool>,
-    mut recorded_key: ResMut<RecordedPressedKey>,
     mut reset_vix_evw: EventWriter<ResetVisibilityEvent>,
-    ui_state: ResMut<UiState>,
-    mut ui_panel_visible: Local<bool>,
+    mut ui_state: ResMut<UiState>,
     mut global_scale: ResMut<GlobalScale>,
-    mut cursor_state: ResMut<MultiCursorEnabled>,
-    mut cursor_evw: EventWriter<ToggleCursor>,
     mut save_cropped_evw: EventWriter<SaveCropped>,
     mut reset_scales_evw: EventWriter<ResetScales>,
     mut fit_to_screen_evw: EventWriter<FitToScreen>,
-    mut change_title_style_evw: EventWriter<ChangeTitleStyleEvent>,
-    mut next_state: ResMut<NextState<MyAppState>>,
 ) {
     if ui_state.visible {
         egui::TopBottomPanel::bottom("wrap_app_top_bar").show(contexts.ctx_mut(), |ui| {
@@ -446,7 +449,7 @@ fn ui_main(
                 egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
                 |ui| {
                     egui::widgets::global_dark_light_mode_switch(ui);
-                    ui.toggle_value(&mut *ui_panel_visible, "Settings");
+                    ui.toggle_value(&mut ui_state.settings_panel_visible, "Settings");
                     ui.separator();
                     let mut scale = global_scale.0.log2();
                     if ui
@@ -501,103 +504,120 @@ fn ui_main(
                 },
             );
         });
+    }
+}
 
-        if *ui_panel_visible {
-            egui::SidePanel::right("Settings")
-                .resizable(false)
-                .show(contexts.ctx_mut(), |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("Settings");
-                        ui.hyperlink_to(
-                            format!("{} Source Code", egui::special_emojis::GITHUB),
-                            "https://github.com/edmBernard/image-viewer-rs",
+fn ui_settings_menu(
+    mut contexts: EguiContexts,
+    mut config: ResMut<Config>,
+    mut ongoing_edit: Local<ConfigShortcutAsBool>,
+    mut recorded_key: ResMut<RecordedPressedKey>,
+    ui_state: Res<UiState>,
+    mut cursor_state: ResMut<MultiCursorEnabled>,
+    mut cursor_evw: EventWriter<ToggleCursor>,
+    mut change_title_style_evw: EventWriter<ChangeTitleStyleEvent>,
+    mut save_settings_evw: EventWriter<SaveSettingsEvent>,
+    mut next_state: ResMut<NextState<MyAppState>>,
+) {
+    if ui_state.settings_panel_visible {
+        egui::SidePanel::right("Settings")
+            .resizable(false)
+            .show(contexts.ctx_mut(), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Settings");
+                    ui.hyperlink_to(
+                        format!("{} Source Code", egui::special_emojis::GITHUB),
+                        "https://github.com/edmBernard/image-viewer-rs",
+                    );
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    ui.checkbox(&mut config.misc.zoom_on_scroll_enabled, "Enable Zoom on Scroll");
+
+                    if ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor").changed() {
+                        cursor_evw.send(ToggleCursor);
+                    };
+
+                    CollapsingHeader::new("Style").default_open(true).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Font Size:");
+                            if ui
+                                .add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0))
+                                .changed()
+                            {
+                                change_title_style_evw.send(ChangeTitleStyleEvent);
+                            }
+                        });
+                        let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
+                        ui.horizontal(|ui| {
+                            ui.label("Font Color:");
+                            if ui.color_edit_button_rgba_unmultiplied(&mut color_vec).changed() {
+                                change_title_style_evw.send(ChangeTitleStyleEvent);
+                            }
+                            ui.label(format!(
+                                "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                color_vec[0], color_vec[1], color_vec[2], color_vec[3],
+                            ));
+                        });
+                        config.text.font_color = Color::rgba_linear_from_array(color_vec);
+                    });
+
+                    CollapsingHeader::new("Short Cut").default_open(true).show(ui, |ui| {
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
+                            "Save Crop:",
+                            &mut config.shortcut.save_crop_image,
+                            &mut ongoing_edit.save_crop_image,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
+                            "Local Zoom Modifier:",
+                            &mut config.shortcut.local_zoom_modifier,
+                            &mut ongoing_edit.local_zoom_modifier,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
+                            "Change Cursor:",
+                            &mut config.shortcut.switch_cursor,
+                            &mut ongoing_edit.switch_cursor,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
+                            "Rotate:",
+                            &mut config.shortcut.rotate_images,
+                            &mut ongoing_edit.rotate_images,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
+                            "Change Layout:",
+                            &mut config.shortcut.switch_layout,
+                            &mut ongoing_edit.switch_layout,
+                            &mut recorded_key,
                         );
                     });
-                    ui.separator();
-                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                        ui.checkbox(&mut config.misc.zoom_on_scroll_enabled, "Enable Zoom on Scroll");
 
-                        if ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor").changed() {
-                            cursor_evw.send(ToggleCursor);
-                        };
-
-                        CollapsingHeader::new("Style").default_open(true).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Font Size:");
-                                if ui.add(egui::Slider::new(&mut config.text.font_size, 8.0..=70.0)).changed() {
-                                    change_title_style_evw.send(ChangeTitleStyleEvent);
-                                }
-                            });
-                            let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
-                            ui.horizontal(|ui| {
-                                ui.label("Font Color:");
-                                if ui.color_edit_button_rgba_unmultiplied(&mut color_vec).changed() {
-                                    change_title_style_evw.send(ChangeTitleStyleEvent);
-                                }
-                                ui.label(format!(
-                                    "rgba: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                    color_vec[0], color_vec[1], color_vec[2], color_vec[3],
-                                ));
-                            });
-                            config.text.font_color = Color::rgba_linear_from_array(color_vec);
-                        });
-
-                        CollapsingHeader::new("Short Cut").default_open(true).show(ui, |ui| {
-                            keycode_dropdown(
-                                ui,
-                                &mut next_state,
-                                "Save Crop:",
-                                &mut config.shortcut.save_crop_image,
-                                &mut ongoing_edit.save_crop_image,
-                                &mut recorded_key,
-                            );
-                            keycode_dropdown(
-                                ui,
-                                &mut next_state,
-                                "Local Zoom Modifier:",
-                                &mut config.shortcut.local_zoom_modifier,
-                                &mut ongoing_edit.local_zoom_modifier,
-                                &mut recorded_key,
-                            );
-                            keycode_dropdown(
-                                ui,
-                                &mut next_state,
-                                "Change Cursor:",
-                                &mut config.shortcut.switch_cursor,
-                                &mut ongoing_edit.switch_cursor,
-                                &mut recorded_key,
-                            );
-                            keycode_dropdown(
-                                ui,
-                                &mut next_state,
-                                "Rotate:",
-                                &mut config.shortcut.rotate_images,
-                                &mut ongoing_edit.rotate_images,
-                                &mut recorded_key,
-                            );
-                            keycode_dropdown(
-                                ui,
-                                &mut next_state,
-                                "Change Layout:",
-                                &mut config.shortcut.switch_layout,
-                                &mut ongoing_edit.switch_layout,
-                                &mut recorded_key,
-                            );
-                        });
-                    });
+                    if ui.button("Save Settings").clicked() {
+                        save_settings_evw.send(SaveSettingsEvent);
+                    };
                 });
-        }
+            });
     }
 }
 
 fn ui_edit_short_cut(mut contexts: EguiContexts) {
     egui::CentralPanel::default().show(contexts.ctx_mut(), |ui| {
-        ui.with_layout(
-            egui::Layout::top_down_justified(egui::Align::Center),
-            |ui| {
-                ui.heading("Press short cut key");
-            },
-        )
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+            ui.heading("Press short cut key");
+        })
     });
 }
 
@@ -1362,6 +1382,33 @@ fn save_cropped(
                 continue;
             };
         }
+    }
+}
+
+fn save_settings(mut save_settings_evr: EventReader<SaveSettingsEvent>, config: Res<Config>) {
+    for _ev in save_settings_evr.read() {
+        let Some(home_directory) = home::home_dir() else {
+            println!("User directory not found");
+            return;
+        };
+        println!("User Directory Found: {}", home_directory.display());
+        let config_filename = ".image_viewer";
+        println!("{}", home_directory.join(config_filename).display());
+        let dst_path = home_directory.join(config_filename);
+
+        let Ok(mut file) = File::create(dst_path) else {
+            println!("Failed to create config file");
+            return;
+        };
+
+        let Ok(config_str) = toml::to_string_pretty::<Config>(&*config) else {
+            println!("Failed to serialize config");
+            return;
+        };
+        let Ok(_) = file.write_all(config_str.as_bytes()) else {
+            println!("Failed to write config to file");
+            return;
+        };
     }
 }
 
