@@ -46,6 +46,10 @@ There is a config file that allow to change shortcut, font and other things. you
 
 ## Build
 
+### Install Rust
+
+Check official installation instruction [get started](https://www.rust-lang.org/tools/install)
+
 ### Get source
 
 The recommended way to obtain the source code is to clone the entire repository from GitHub:
@@ -72,7 +76,7 @@ cargo bundle
 
 It will generate a `image-viewer.app`.
 
-*Note*: Creating a bundle on osx allow to remove the execution of terminal in background of the GUI.
+*Note*: Creating a bundle on osx allow to remove the execution of terminal in background of the GUI and add the nice app icon.
 
 ## Disclaimer
 
