@@ -196,8 +196,6 @@ fn main() -> Result<()> {
                 mouse_button_input,
                 cursor_move,
                 file_drop,
-                change_top_image,
-                change_image_rotation,
                 on_reset_visibility,
                 on_resize_system,
                 on_image_loaded,
@@ -205,9 +203,10 @@ fn main() -> Result<()> {
                 on_move_image,
                 on_move_image_title,
                 on_load_image,
+                on_image_spawned,
                 toggle_help,
             )
-                .run_if(in_state(MyAppState::Working)),
+            .run_if(in_state(MyAppState::Working)),
         )
         // Bevy doesn't allow more than 20 systems in the declaration of anonymous system set
         // https://docs.rs/bevy/latest/bevy/ecs/schedule/trait.IntoSystemConfigs.html#foreign-impls
@@ -215,6 +214,8 @@ fn main() -> Result<()> {
         .add_systems(
             Update,
             (
+                change_top_image,
+                change_image_rotation,
                 key_toggle_cursor,
                 toggle_cursor,
                 reset_scales,
@@ -684,8 +685,6 @@ fn on_load_image(
 fn on_image_loaded(
     config: Res<Config>,
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
-    mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
-    mut fit_to_screen_evw: EventWriter<FitToScreen>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
     mut image_loaded: Local<usize>,
@@ -753,9 +752,6 @@ fn on_image_loaded(
             Id(ev.index),
             MyText,
         ));
-
-        reset_vis_evw.send(ResetVisibilityEvent);
-        fit_to_screen_evw.send(FitToScreen);
 
         let mut visibility = help_query.single_mut();
         *visibility = Visibility::Hidden;
@@ -1251,6 +1247,19 @@ fn reset_scales(
             scale.0 = 1.0;
         }
     }
+}
+
+fn on_image_spawned(
+    mut fit_to_screen_evw: EventWriter<FitToScreen>,
+    mut reset_vis_evw: EventWriter<ResetVisibilityEvent>,
+    sprite_query: Query<&Id, Added<MyImage>>,
+) {
+    if sprite_query.iter().count() == 0 {
+        return;
+    }
+
+    reset_vis_evw.send(ResetVisibilityEvent);
+    fit_to_screen_evw.send(FitToScreen);
 }
 
 fn fit_to_screen(
