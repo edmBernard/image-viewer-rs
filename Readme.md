@@ -71,7 +71,7 @@ The executable is named `image-viewer-rs`
 Install [cargo-bundle](https://github.com/burtonageo/cargo-bundle). and run the following command :
 
 ```bash
-cargo bundle
+cargo bundle --release
 ```
 
 It will generate a `image-viewer.app`.
