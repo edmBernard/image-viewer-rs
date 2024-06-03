@@ -485,10 +485,10 @@ fn ui_bottom_menu(
                         .selectable_value(&mut layout_state.layout, GridLayout::Stack, "Stack")
                         .changed();
                     let elem3 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Horizontal, "Horizontal")
+                        .selectable_value(&mut layout_state.layout, GridLayout::Vertical, "Vertical")
                         .changed();
                     let elem4 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Vertical, "Vertical")
+                        .selectable_value(&mut layout_state.layout, GridLayout::Horizontal, "Horizontal")
                         .changed();
                     if elem1 || elem2 || elem3 || elem4 {
                         reset_vix_evw.send(ResetVisibilityEvent);
@@ -1052,11 +1052,11 @@ fn change_global_zoom(
     } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit2) {
         1.
     } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit3) {
-        3.
+        2.
     } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit4) {
-        4.
+        3.
     } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit5) {
-        5.
+        4.
     } else {
         return;
     };
