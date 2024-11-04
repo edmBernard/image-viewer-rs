@@ -378,7 +378,7 @@ fn setup(
             TextStyle {
                 font: font_handle,
                 font_size: 18.0,
-                color: Color::ANTIQUE_WHITE,
+                color: Color::Srgba(bevy::color::palettes::css::ANTIQUE_WHITE),
             },
         )
         .with_text_justify(JustifyText::Left)
@@ -449,12 +449,13 @@ fn ui_bottom_menu(
                 initial_size,
                 egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
                 |ui| {
-                    egui::widgets::global_dark_light_mode_switch(ui);
+                    egui::widgets::global_theme_preference_switch(ui);
                     ui.toggle_value(&mut ui_state.settings_panel_visible, "Settings");
                     ui.separator();
                     let mut scale = global_scale.0.log2();
+
                     if ui
-                        .add(egui::DragValue::new(&mut scale).speed(0.1).clamp_range(-10.0..=10.))
+                        .add(egui::DragValue::new(&mut scale).prefix("\u{1F50E} ").speed(0.1).range(-10.0..=10.))
                         .on_hover_text("Zoom")
                         .changed()
                     {
@@ -549,7 +550,7 @@ fn ui_settings_menu(
                                 change_title_style_evw.send(ChangeTitleStyleEvent);
                             }
                         });
-                        let mut color_vec = config.text.font_color.rgba_linear_to_vec4().to_array();
+                        let mut color_vec = config.text.font_color.to_linear().to_f32_array();
                         ui.horizontal(|ui| {
                             ui.label("Font Color:");
                             if ui.color_edit_button_rgba_unmultiplied(&mut color_vec).changed() {
@@ -560,7 +561,7 @@ fn ui_settings_menu(
                                 color_vec[0], color_vec[1], color_vec[2], color_vec[3],
                             ));
                         });
-                        config.text.font_color = Color::rgba_linear_from_array(color_vec);
+                        config.text.font_color = Color::LinearRgba(LinearRgba::from_f32_array(color_vec));
                     });
 
                     CollapsingHeader::new("Short Cut").default_open(true).show(ui, |ui| {
@@ -637,8 +638,9 @@ fn on_load_image(
             continue;
         };
 
+
         let buf = BufReader::new(f);
-        let mut reader = image::io::Reader::with_format(buf, format);
+        let mut reader = image::ImageReader::with_format(buf, format);
 
         // Remove the memory limit on image size we can read
         reader.no_limits();
@@ -1183,7 +1185,7 @@ fn toggle_cursor(
                         MyCursor,
                     ))
                     .with_children(|parent| {
-                        let cursor_color = Color::rgb(0.75, 0., 0.);
+                        let cursor_color = Color::srgb(0.75, 0., 0.);
                         let bar_size = 15.;
                         let cursor_size = Some(Vec2::new(bar_size, 4.0));
                         parent.spawn(SpriteBundle {
@@ -1347,7 +1349,7 @@ fn save_cropped(
                 continue;
             };
 
-            let mut reader = image::io::Reader::with_format(buf_in, format);
+            let mut reader = image::ImageReader::with_format(buf_in, format);
 
             // Remove the memory limit on image size we can read
             reader.no_limits();
