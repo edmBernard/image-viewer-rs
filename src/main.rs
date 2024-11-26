@@ -86,6 +86,7 @@ struct ConfigHDR {
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigMisc {
     zoom_on_scroll_enabled: bool,
+    grid_width: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Resource)]
@@ -540,6 +541,11 @@ fn ui_settings_menu(
                         cursor_evw.send(ToggleCursor);
                     };
 
+                    ui.horizontal(|ui| {
+                        ui.label("Grid Width:");
+                        ui.add(egui::DragValue::new(&mut config.misc.grid_width));
+                    });
+
                     CollapsingHeader::new("Style").default_open(true).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Font Size:");
@@ -780,6 +786,7 @@ fn on_move_image(
     layout_state: Res<GridLayoutState>,
     mouse_state: Res<MouseState>,
     mut title_query: Query<&mut Style, With<MyText>>,
+    config: Res<Config>,
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -794,7 +801,7 @@ fn on_move_image(
         };
         let image_size = image.size().as_vec2();
 
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         transform.translation = (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
             .extend(transform.translation.z)
             * Vec3::new(1., -1., 1.);
@@ -821,7 +828,7 @@ fn on_move_image(
         sprite.rect = Some(cell.intersect(image_crop));
     }
 
-    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window);
+    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window, config.misc.grid_width);
     for mut style in &mut title_query {
         style.width = Val::Px(cell_size.x);
     }
@@ -832,6 +839,7 @@ fn on_move_image_title(
     windows: Query<&Window>,
     mut text_query: Query<(&Id, &mut Style), With<MyText>>,
     layout_state: Res<GridLayoutState>,
+    config: Res<Config>,
 ) {
     if move_image_evr.is_empty() {
         return;
@@ -842,7 +850,7 @@ fn on_move_image_title(
     let window = windows.single();
 
     for (id, mut style) in &mut text_query {
-        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         style.top = Val::Px(cell_offset.y + 2.);
         style.left = Val::Px(cell_offset.x + 5.);
     }
@@ -870,6 +878,7 @@ fn on_move_cursor(
     windows: Query<&Window>,
     mut cursor_query: Query<(&Id, &mut Transform), With<MyCursor>>,
     layout_state: Res<GridLayoutState>,
+    config: Res<Config>,
 ) {
     let num_images = cursor_query.iter().count();
     let window = windows.single();
@@ -878,7 +887,7 @@ fn on_move_cursor(
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -1097,7 +1106,7 @@ fn change_zoom_individually(
 
         let position_normalized = 'outer: {
             for (id, mut scale, position) in &mut sprite_query {
-                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
@@ -1122,7 +1131,7 @@ fn change_zoom_individually(
     }
 }
 
-fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window) -> (Vec2, Vec2) {
+fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window, grid_width: i32) -> (Vec2, Vec2) {
     let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / num_images as f32, 0.);
@@ -1139,7 +1148,11 @@ fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &
             (Vec2::ZERO, cell_size)
         }
         GridLayout::Grid => {
-            let grid_width = (num_images as f32).sqrt().ceil();
+            let grid_width = if grid_width == 0 {
+                (num_images as f32).sqrt().ceil()
+            } else {
+                grid_width as f32
+            };
             let grid_height = (num_images as f32 / grid_width).ceil();
             let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
             let cell_size = step.abs();
@@ -1271,6 +1284,7 @@ fn fit_to_screen(
     mut global_scale: ResMut<GlobalScale>,
     mut sprite_query: Query<(&Id, &Handle<Image>, &mut Scale, &mut Position), With<MyImage>>,
     layout_state: Res<GridLayoutState>,
+    config: Res<Config>,
 ) {
     for _ev in fit_to_screen_evr.read() {
         let window = windows.single();
@@ -1282,7 +1296,7 @@ fn fit_to_screen(
             };
             let image_size = image.size().as_vec2();
 
-            let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window);
+            let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
 
             let factor = cell_size / image_size;
 
