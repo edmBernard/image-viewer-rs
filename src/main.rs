@@ -57,6 +57,7 @@ enum MyAppState {
 struct ConfigShortcut {
     save_crop_image: KeyCode,
     local_zoom_modifier: KeyCode,
+    local_rotate_modifier: KeyCode,
     switch_cursor: KeyCode,
     switch_layout: KeyCode,
     rotate_images: KeyCode,
@@ -67,6 +68,7 @@ struct ConfigShortcut {
 struct ConfigShortcutAsBool {
     save_crop_image: bool,
     local_zoom_modifier: bool,
+    local_rotate_modifier: bool,
     switch_cursor: bool,
     switch_layout: bool,
     rotate_images: bool,
@@ -161,6 +163,7 @@ fn main() -> Result<()> {
         .insert_resource(UiState { visible: true, settings_panel_visible: false})
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
+        .insert_resource(GlobalRotation(0.))
         .insert_resource(MultiCursorEnabled(false))
         .insert_resource(RecordedPressedKey(None))
         .insert_resource(GridLayoutState {
@@ -193,6 +196,7 @@ fn main() -> Result<()> {
                 change_layout_on_click,
                 change_global_zoom,
                 change_zoom_individually,
+                change_rotation_individually,
                 scroll_events,
                 mouse_button_input,
                 cursor_move,
@@ -216,7 +220,7 @@ fn main() -> Result<()> {
             Update,
             (
                 change_top_image,
-                change_image_rotation,
+                change_global_rotation,
                 key_toggle_cursor,
                 toggle_cursor,
                 reset_scales,
@@ -264,6 +268,9 @@ struct GridLayoutState {
 
 #[derive(Resource)]
 struct GlobalScale(f32);
+
+#[derive(Resource)]
+struct GlobalRotation(f32);
 
 #[derive(Resource)]
 struct MouseState {
@@ -590,6 +597,14 @@ fn ui_settings_menu(
                         keycode_dropdown(
                             ui,
                             &mut next_state,
+                            "Local Rotate Modifier:",
+                            &mut config.shortcut.local_rotate_modifier,
+                            &mut ongoing_edit.local_rotate_modifier,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
                             "Change Cursor:",
                             &mut config.shortcut.switch_cursor,
                             &mut ongoing_edit.switch_cursor,
@@ -783,6 +798,7 @@ fn on_move_image(
         With<MyImage>,
     >,
     global_scale: Res<GlobalScale>,
+    global_rotation: Res<GlobalRotation>,
     layout_state: Res<GridLayoutState>,
     mouse_state: Res<MouseState>,
     mut title_query: Query<&mut Style, With<MyText>>,
@@ -806,12 +822,13 @@ fn on_move_image(
             .extend(transform.translation.z)
             * Vec3::new(1., -1., 1.);
         transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
-        transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation.0);
+        let rotation_total = global_rotation.0 + rotation.0;
+        transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation_total);
 
         let delta =
-            Vec2::from_angle(PI / 2. * rotation.0).rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
+            Vec2::from_angle(- PI / 2. * rotation_total).rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
-        let rotated_cell_size = if rotation.0 % 2. == 0. {
+        let rotated_cell_size = if rotation_total % 2. == 0. {
             cell_size
         } else {
             Vec2::new(cell_size.y, cell_size.x)
@@ -1027,16 +1044,14 @@ fn change_top_image(
     move_image_evw.send(MoveImageEvent);
 }
 
-fn change_image_rotation(
+fn change_global_rotation(
     config: Res<Config>,
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
-    mut rotation_query: Query<&mut Rotation, With<MyImage>>,
+    mut global_rotation: ResMut<GlobalRotation>,
 ) {
     if keys.just_pressed(config.shortcut.rotate_images) {
-        for mut rotation in &mut rotation_query {
-            rotation.0 += 1.;
-        }
+        global_rotation.0 += 1.;
     };
     move_image_evw.send(MoveImageEvent);
 }
@@ -1076,6 +1091,50 @@ fn change_global_zoom(
     global_scale.0 = zoom_factor;
 
     move_image_evw.send(MoveImageEvent);
+}
+
+fn change_rotation_individually(
+    config: Res<Config>,
+    windows: Query<&Window>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut move_image_evw: EventWriter<MoveImageEvent>,
+    layout_state: Res<GridLayoutState>,
+    mut sprite_query: Query<(&Id, &mut Rotation), With<MyImage>>,
+) {
+    if keys.pressed(config.shortcut.local_rotate_modifier) {
+        if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
+            return;
+        }
+
+        let num_images = sprite_query.iter().count();
+        let window = windows.single();
+
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+
+        let rotate_turn = if buttons.just_pressed(MouseButton::Left) {
+            1.
+        } else {
+            -1.
+        };
+
+        for (id, mut rotate) in &mut sprite_query {
+            let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+
+            if cursor_position.x > cell_offset.x
+                && cursor_position.x < cell_offset.x + cell_size.x
+                && cursor_position.y > cell_offset.y
+                && cursor_position.y < cell_offset.y + cell_size.y
+            {
+                rotate.0 += rotate_turn;
+                break;
+            }
+        }
+
+        move_image_evw.send(MoveImageEvent);
+    }
 }
 
 fn change_zoom_individually(
