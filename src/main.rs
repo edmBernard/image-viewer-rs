@@ -61,6 +61,7 @@ struct ConfigShortcut {
     switch_cursor: KeyCode,
     switch_layout: KeyCode,
     rotate_images: KeyCode,
+    add_images: KeyCode,
 }
 
 // Used to store temporary edition during manual edit
@@ -72,6 +73,7 @@ struct ConfigShortcutAsBool {
     switch_cursor: bool,
     switch_layout: bool,
     rotate_images: bool,
+    add_images: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -99,6 +101,7 @@ struct Config {
     misc: ConfigMisc,
 }
 
+// MARK: Main
 fn main() -> Result<()> {
     let args = Args::parse();
     let images_filename = check_all_images_exist(&args.images)?;
@@ -160,10 +163,14 @@ fn main() -> Result<()> {
         ))
         .insert_state(MyAppState::Working)
         .insert_resource(InitialImagesFilename(images_filename))
-        .insert_resource(UiState { visible: true, settings_panel_visible: false})
+        .insert_resource(UiState {
+            visible: true,
+            settings_panel_visible: false,
+        })
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(GlobalRotation(0.))
+        .insert_resource(NewImageBatch(true))
         .insert_resource(MultiCursorEnabled(false))
         .insert_resource(RecordedPressedKey(None))
         .insert_resource(GridLayoutState {
@@ -211,7 +218,7 @@ fn main() -> Result<()> {
                 on_image_spawned,
                 toggle_help,
             )
-            .run_if(in_state(MyAppState::Working)),
+                .run_if(in_state(MyAppState::Working)),
         )
         // Bevy doesn't allow more than 20 systems in the declaration of anonymous system set
         // https://docs.rs/bevy/latest/bevy/ecs/schedule/trait.IntoSystemConfigs.html#foreign-impls
@@ -271,6 +278,9 @@ struct GlobalScale(f32);
 
 #[derive(Resource)]
 struct GlobalRotation(f32);
+
+#[derive(Resource)]
+struct NewImageBatch(bool);
 
 #[derive(Resource)]
 struct MouseState {
@@ -349,16 +359,15 @@ struct NewImageLoadedEvent {
     handle: Handle<Image>,
     path: String,
     index: usize,
-    count: usize,
 }
 
 #[derive(Event)]
 struct LoadNewImageEvent {
     path: String,
     index: usize,
-    count: usize,
 }
 
+// MARK: Setup
 fn setup(
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
@@ -399,12 +408,10 @@ fn setup(
         MyHelp,
     ));
 
-    let count = images_filename.0.len();
     for (index, image) in images_filename.0.iter().enumerate() {
         load_image_evw.send(LoadNewImageEvent {
             path: image.clone(),
             index: index,
-            count: count,
         });
     }
 }
@@ -463,7 +470,12 @@ fn ui_bottom_menu(
                     let mut scale = global_scale.0.log2();
 
                     if ui
-                        .add(egui::DragValue::new(&mut scale).prefix("\u{1F50E} ").speed(0.1).range(-10.0..=10.))
+                        .add(
+                            egui::DragValue::new(&mut scale)
+                                .prefix("\u{1F50E} ")
+                                .speed(0.1)
+                                .range(-10.0..=10.),
+                        )
                         .on_hover_text("Zoom")
                         .changed()
                     {
@@ -621,6 +633,14 @@ fn ui_settings_menu(
                         keycode_dropdown(
                             ui,
                             &mut next_state,
+                            "Add Images:",
+                            &mut config.shortcut.add_images,
+                            &mut ongoing_edit.add_images,
+                            &mut recorded_key,
+                        );
+                        keycode_dropdown(
+                            ui,
+                            &mut next_state,
                             "Change Layout:",
                             &mut config.shortcut.switch_layout,
                             &mut ongoing_edit.switch_layout,
@@ -658,7 +678,6 @@ fn on_load_image(
             println!("Failed to deduce image format from path");
             continue;
         };
-
 
         let buf = BufReader::new(f);
         let mut reader = image::ImageReader::with_format(buf, format);
@@ -700,7 +719,6 @@ fn on_load_image(
             handle: handle,
             path: ev.path.clone(),
             index: ev.index,
-            count: ev.count,
         });
     }
 }
@@ -710,22 +728,24 @@ fn on_image_loaded(
     mut load_image_evr: EventReader<NewImageLoadedEvent>,
     mut commands: Commands,
     images: Query<Entity, With<Id>>,
-    mut image_loaded: Local<usize>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
     layout_state: Res<GridLayoutState>,
+    mut is_new_batch: ResMut<NewImageBatch>,
 ) {
     for ev in load_image_evr.read() {
         let font = font_query.single();
 
-        if *image_loaded == 0 {
+        if is_new_batch.0 {
             for entity in &images {
                 commands.entity(entity).despawn();
             }
+            is_new_batch.0 = false;
         }
+
         let visibility = match layout_state.layout {
             GridLayout::Stack => {
-                if *image_loaded != layout_state.index {
+                if ev.index != layout_state.index {
                     Visibility::Hidden
                 } else {
                     Visibility::Visible
@@ -733,11 +753,6 @@ fn on_image_loaded(
             }
             _ => Visibility::Visible,
         };
-
-        *image_loaded += 1;
-        if *image_loaded >= ev.count {
-            *image_loaded = 0;
-        }
 
         commands.spawn((
             SpriteBundle {
@@ -817,7 +832,8 @@ fn on_move_image(
         };
         let image_size = image.size().as_vec2();
 
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+        let (cell_offset, cell_size) =
+            get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         transform.translation = (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
             .extend(transform.translation.z)
             * Vec3::new(1., -1., 1.);
@@ -825,8 +841,8 @@ fn on_move_image(
         let rotation_total = global_rotation.0 + rotation.0;
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation_total);
 
-        let delta =
-            Vec2::from_angle(- PI / 2. * rotation_total).rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
+        let delta = Vec2::from_angle(-PI / 2. * rotation_total)
+            .rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
         let rotated_cell_size = if rotation_total % 2. == 0. {
             cell_size
@@ -904,7 +920,8 @@ fn on_move_cursor(
         return;
     };
     for (id, mut transform) in &mut cursor_query {
-        let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+        let (cell_offset, cell_size) =
+            get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -1121,7 +1138,8 @@ fn change_rotation_individually(
         };
 
         for (id, mut rotate) in &mut sprite_query {
-            let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+            let (cell_offset, cell_size) =
+                get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
 
             if cursor_position.x > cell_offset.x
                 && cursor_position.x < cell_offset.x + cell_size.x
@@ -1165,7 +1183,8 @@ fn change_zoom_individually(
 
         let position_normalized = 'outer: {
             for (id, mut scale, position) in &mut sprite_query {
-                let (cell_offset, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+                let (cell_offset, cell_size) =
+                    get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
@@ -1190,7 +1209,13 @@ fn change_zoom_individually(
     }
 }
 
-fn get_cell_rect(index: usize, num_images: usize, layout: &GridLayout, window: &Window, grid_width: i32) -> (Vec2, Vec2) {
+fn get_cell_rect(
+    index: usize,
+    num_images: usize,
+    layout: &GridLayout,
+    window: &Window,
+    grid_width: i32,
+) -> (Vec2, Vec2) {
     let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
         GridLayout::Horizontal => {
             let step = Vec2::new(window.width() / num_images as f32, 0.);
@@ -1572,11 +1597,23 @@ fn cursor_move(
     }
 }
 
-fn file_drop(mut dnd_evr: EventReader<FileDragAndDrop>, mut load_image_evw: EventWriter<LoadNewImageEvent>) {
+fn file_drop(
+    mut dnd_evr: EventReader<FileDragAndDrop>,
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: EventWriter<LoadNewImageEvent>,
+    keys: Res<ButtonInput<KeyCode>>,
+    config: Res<Config>,
+    sprite_query: Query<&Id, With<MyImage>>,
+) {
+    if dnd_evr.is_empty() {
+        return;
+    }
     let mut images_filename = Vec::new();
 
+    let mut some_file_dropped = false;
     for ev in dnd_evr.read() {
         if let FileDragAndDrop::DroppedFile { path_buf, .. } = ev {
+            some_file_dropped = true;
             let Some(image_absolute) = path_buf.as_path().to_str() else {
                 println!("Can't resolve given path: {:?}", path_buf);
                 continue;
@@ -1584,13 +1621,18 @@ fn file_drop(mut dnd_evr: EventReader<FileDragAndDrop>, mut load_image_evw: Even
             images_filename.push(String::from(image_absolute));
         }
     }
-    let count = images_filename.iter().count();
-    for (index, filename) in images_filename.into_iter().enumerate() {
-        load_image_evw.send(LoadNewImageEvent {
-            path: filename,
-            index: index,
-            count: count,
-        });
+    if some_file_dropped {
+        let mut count: usize = sprite_query.iter().count();
+        for (index, filename) in images_filename.into_iter().enumerate() {
+            if !keys.pressed(config.shortcut.add_images) {
+                is_new_batch.0 = true;
+                count = 0;
+            }
+            load_image_evw.send(LoadNewImageEvent {
+                path: filename,
+                index: count + index,
+            });
+        }
     }
 }
 

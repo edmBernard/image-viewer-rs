@@ -4,11 +4,15 @@ save_crop_image = "KeyP"
 # Shortcut to toggle the multicursor
 local_zoom_modifier = "KeyW"
 # Shortcut to toggle the multicursor
+local_rotate_modifier = "KeyE"
+# Shortcut to toggle the multicursor
 switch_cursor = "KeyC"
 # Shortcut to switch between layout (grid, stack; horizontal ...)
 switch_layout = "KeyL"
 # Shortcut to rotate all images
 rotate_images = "KeyR"
+# Shortcut to add new images instead of reseting
+add_images = "KeyQ"
 
 [text]
 # Color of the image name shown in the corner
@@ -22,3 +26,5 @@ enabled = false
 [misc]
 # Enable the zoom on mouse scroll
 zoom_on_scroll_enabled = true
+# Width of the grid (0: auto)
+grid_width = 0
