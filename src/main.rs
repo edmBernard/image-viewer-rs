@@ -33,11 +33,13 @@ struct Args {
 const HELP_STRING: &'static str = "Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
     Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
-    R: Rotate images
     Shift + 1, 2, 3, ...: Move Image on top
     Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
     Ctrl/Cmd + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
     Z + Right/Left clic: zoom in/out the hovered image only
+    R: Rotate all images CW
+    E + Right/Left clic: rotate CW/CCW the hovered image only
+    A + drop file : Add new images to the comparison
     C: Toggle multi cursor
     P: Save image to disk with the displayed crop (suffixed by _crop)
     H: Toggle Interface
