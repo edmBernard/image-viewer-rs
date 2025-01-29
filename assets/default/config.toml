@@ -25,6 +25,6 @@ enabled = false
 
 [misc]
 # Enable the zoom on mouse scroll
-zoom_on_scroll_enabled = true
+scroll_behavior = "None"
 # Width of the grid (0: auto)
 grid_width = 0

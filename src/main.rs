@@ -53,6 +53,13 @@ enum MyAppState {
     EditShortCut,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+enum ScrollBehavior {
+    Zoom,
+    Move,
+    None,
+}
+
 // -----------------------------
 // Config Struct
 #[derive(Serialize, Deserialize, Debug)]
@@ -91,7 +98,7 @@ struct ConfigHDR {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigMisc {
-    zoom_on_scroll_enabled: bool,
+    scroll_behavior: ScrollBehavior,
     grid_width: i32,
 }
 
@@ -556,7 +563,18 @@ fn ui_settings_menu(
                 });
                 ui.separator();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.checkbox(&mut config.misc.zoom_on_scroll_enabled, "Enable Zoom on Scroll");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Behavior on Scroll:");
+                        egui::ComboBox::from_label("")
+                            .selected_text(format!("{:?}", config.misc.scroll_behavior))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::None, "Disabled");
+                                ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::Move, "Move");
+                                ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::Zoom, "Zoom");
+                            }
+                        );
+                    });
 
                     if ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor").changed() {
                         cursor_evw.send(ToggleCursor);
@@ -673,11 +691,11 @@ fn on_load_image(
 ) {
     for ev in load_evr.read() {
         let Some(f) = File::open(&ev.path).ok() else {
-            println!("Failed to open file {}", ev.path);
+            println!("Failed to open file: {}", ev.path);
             continue;
         };
         let Some(format) = ImageFormat::from_path(&ev.path).ok() else {
-            println!("Failed to deduce image format from path");
+            println!("Failed to deduce image format from path: {}", ev.path);
             continue;
         };
 
@@ -688,7 +706,7 @@ fn on_load_image(
         reader.no_limits();
 
         let Some(image) = reader.decode().ok() else {
-            println!("Failed to decode image");
+            println!("Failed to decode image: {}", ev.path);
             continue;
         };
 
@@ -1529,20 +1547,40 @@ fn scroll_events(
     mut scroll_evr: EventReader<MouseWheel>,
     mut move_image_evw: EventWriter<MoveImageEvent>,
     mut global_scale: ResMut<GlobalScale>,
+    mut mouse_state: ResMut<MouseState>,
 ) {
-    if config.misc.zoom_on_scroll_enabled {
-        use bevy::input::mouse::MouseScrollUnit;
-        for ev in scroll_evr.read() {
-            let scroll = match ev.unit {
-                MouseScrollUnit::Line => ev.y,
-                MouseScrollUnit::Pixel => ev.y,
-            };
+    match config.misc.scroll_behavior {
+        ScrollBehavior::Zoom => {
+            use bevy::input::mouse::MouseScrollUnit;
+            for ev in scroll_evr.read() {
+                let scroll = match ev.unit {
+                    MouseScrollUnit::Line => ev.y,
+                    MouseScrollUnit::Pixel => ev.y,
+                };
 
-            let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
-            global_scale.0 *= zoom_factor;
+                let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
+                global_scale.0 *= zoom_factor;
 
-            move_image_evw.send(MoveImageEvent);
+                move_image_evw.send(MoveImageEvent);
+            }
         }
+        ScrollBehavior::Move => {
+            use bevy::input::mouse::MouseScrollUnit;
+            for ev in scroll_evr.read() {
+                let scroll_vertical = match ev.unit {
+                    MouseScrollUnit::Line => ev.y,
+                    MouseScrollUnit::Pixel => ev.y,
+                };
+                let scroll_horizontal = match ev.unit {
+                    MouseScrollUnit::Line => ev.x,
+                    MouseScrollUnit::Pixel => ev.x,
+                };
+
+                mouse_state.delta += Vec2::new(scroll_horizontal, scroll_vertical);
+                move_image_evw.send(MoveImageEvent);
+            }
+        }
+        ScrollBehavior::None => {}
     }
 }
 
