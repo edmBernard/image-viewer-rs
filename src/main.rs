@@ -416,7 +416,7 @@ fn setup(
         Text::new(HELP_STRING),
         TextFont {
             font: font_handle,
-            font_size: 18.0,
+            font_size: 15.0,
             ..default()
         },
         TextColor(Color::Srgba(bevy::color::palettes::css::ANTIQUE_WHITE)),
@@ -1477,6 +1477,8 @@ fn save_cropped(
                 println!("Failed to decode image");
                 continue;
             };
+            // reader don't preserve the input format and append an alpha channel
+            let image_rgb8 = image.to_rgb8();
 
             // Get Output buffer
             let Some(output_path) = insert_suffix(input_path, "_crop") else {
@@ -1498,7 +1500,7 @@ fn save_cropped(
 
             let size = rect.max - rect.min;
             let image_view = SubImage::new(
-                &image,
+                &image_rgb8,
                 rect.min.x as u32,
                 rect.min.y as u32,
                 size.x as u32,
@@ -1508,8 +1510,8 @@ fn save_cropped(
             let subimage = image_view.to_image();
 
             // Save to disk
-            let Some(_) = subimage.write_to(&mut buf_out, ImageFormat::Jpeg).ok() else {
-                println!("Failed to write data to file {}", &output_path.display());
+            if let Err(e) = subimage.write_to(&mut buf_out, ImageFormat::Jpeg) {
+                println!("Failed to write data to file {}: {}", &output_path.display(), e);
                 continue;
             };
         }
