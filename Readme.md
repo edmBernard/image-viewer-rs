@@ -81,14 +81,3 @@ It will generate a `image-viewer.app`.
 ## Disclaimer
 
 It's a toy project mainly used to learn bevy. So if you spot error, improvement comments are welcome.
-
-TODO: Add drop area to add image in the list instead of replacing (because the A+drop is not practical) in a side panel like the settings but on the left
-TODO: this drop area can also the list of all image with a cross to remove them
-TODO: can we allow reorganisation of the image ? drag and drop will be hard to do but a up and down button on each name is probably easier egui have a example for drag and drop list : https://github.com/emilk/egui/blob/main/crates/egui_demo_lib/src/demo/drag_and_drop.rs
-
-TODO: add copy that alloc to copy the crop to the clip board
-
-TODO: add shader to change gamma tc
-TODO: allow switch between bilinear linear nearest
-
-TODO: Read Exif
