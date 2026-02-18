@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
@@ -22,7 +23,7 @@ use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
-type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
+type Result<T> = ::std::result::Result<T, Box<dyn::std::error::Error>>;
 
 #[derive(Parser, Debug)]
 #[clap(version, long_about = None)]
@@ -59,6 +60,12 @@ enum ScrollBehavior {
     Zoom,
     Move,
     None,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+enum SamplerMode {
+    Nearest,
+    Bilinear,
 }
 
 // MARK: Config Struct
@@ -100,6 +107,7 @@ struct ConfigHDR {
 struct ConfigMisc {
     scroll_behavior: ScrollBehavior,
     grid_width: i32,
+    sampler_mode: SamplerMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Resource)]
@@ -167,7 +175,7 @@ fn main() -> Result<()> {
                     }),
                     ..default()
                 })
-                .set(ImagePlugin::default_nearest()),
+                .set(ImagePlugin::default()),
             EguiPlugin::default(),
         ))
         .insert_state(MyAppState::Working)
@@ -202,18 +210,12 @@ fn main() -> Result<()> {
         .add_message::<FitToScreen>()
         .add_message::<ChangeTitleStyleEvent>()
         .add_message::<SaveSettingsEvent>()
+        .add_message::<ChangeSamplerEvent>()
         // Egui systems must run in EguiPrimaryContextPass (not Update)
+        .add_systems(EguiPrimaryContextPass, configure_visuals.run_if(run_once))
         .add_systems(
             EguiPrimaryContextPass,
-            configure_visuals.run_if(run_once),
-        )
-        .add_systems(
-            EguiPrimaryContextPass,
-            (
-                ui_bottom_menu,
-                ui_settings_menu.after(ui_bottom_menu),
-            )
-                .run_if(in_state(MyAppState::Working)),
+            (ui_bottom_menu, ui_settings_menu.after(ui_bottom_menu)).run_if(in_state(MyAppState::Working)),
         )
         .add_systems(
             EguiPrimaryContextPass,
@@ -262,13 +264,11 @@ fn main() -> Result<()> {
                 save_cropped,
                 save_settings,
                 change_image_title_style,
+                change_sampler,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
-        .add_systems(
-            Update,
-            record_pressed_key.run_if(in_state(MyAppState::EditShortCut)),
-        )
+        .add_systems(Update, record_pressed_key.run_if(in_state(MyAppState::EditShortCut)))
         .run();
 
     Ok(())
@@ -376,6 +376,9 @@ struct FitToScreen;
 
 #[derive(Message)]
 struct ResetVisibilityEvent;
+
+#[derive(Message)]
+struct ChangeSamplerEvent;
 
 #[derive(Message)]
 struct NewImageLoadedEvent {
@@ -562,6 +565,7 @@ fn ui_settings_menu(
     mut cursor_evw: MessageWriter<ToggleCursor>,
     mut change_title_style_evw: MessageWriter<ChangeTitleStyleEvent>,
     mut save_settings_evw: MessageWriter<SaveSettingsEvent>,
+    mut change_sampler_evw: MessageWriter<ChangeSamplerEvent>,
     mut next_state: ResMut<NextState<MyAppState>>,
 ) {
     if ui_state.settings_panel_visible {
@@ -584,6 +588,23 @@ fn ui_settings_menu(
                             ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::None, "Disabled");
                             ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::Move, "Move");
                             ui.selectable_value(&mut config.misc.scroll_behavior, ScrollBehavior::Zoom, "Zoom");
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Interpolation:");
+                    egui::ComboBox::from_label(" ")
+                        .selected_text(format!("{:?}", config.misc.sampler_mode))
+                        .show_ui(ui, |ui| {
+                            let r1 = ui
+                                .selectable_value(&mut config.misc.sampler_mode, SamplerMode::Nearest, "Nearest")
+                                .changed();
+                            let r2 = ui
+                                .selectable_value(&mut config.misc.sampler_mode, SamplerMode::Bilinear, "Bilinear")
+                                .changed();
+                            if r1 || r2 {
+                                change_sampler_evw.write(ChangeSamplerEvent);
+                            }
                         });
                 });
 
@@ -700,6 +721,7 @@ fn on_load_image(
     mut load_evr: MessageReader<LoadNewImageEvent>,
     mut loaded_evw: MessageWriter<NewImageLoadedEvent>,
     mut images: ResMut<Assets<Image>>,
+    config: Res<Config>,
 ) {
     for ev in load_evr.read() {
         let Some(f) = File::open(&ev.path).ok() else {
@@ -745,6 +767,11 @@ fn on_load_image(
                 println!("Unsupported image type : image.color(): {:?}", image.color());
                 continue;
             }
+        };
+        let mut loaded_image = loaded_image;
+        loaded_image.sampler = match config.misc.sampler_mode {
+            SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
+            SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
         };
         let handle = images.add(loaded_image);
         loaded_evw.write(NewImageLoadedEvent {
@@ -1538,6 +1565,30 @@ fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config
             println!("Failed to write config to file");
             return;
         };
+    }
+}
+
+fn change_sampler(
+    mut change_sampler_evr: MessageReader<ChangeSamplerEvent>,
+    config: Res<Config>,
+    sprite_query: Query<&Sprite, With<MyImage>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if change_sampler_evr.is_empty() {
+        return;
+    }
+    change_sampler_evr.clear();
+
+    let new_sampler = match config.misc.sampler_mode {
+        SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
+        SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
+    };
+
+    for sprite in &sprite_query {
+        let Some(image) = images.get_mut(&sprite.image) else {
+            continue;
+        };
+        image.sampler = new_sampler.clone();
     }
 }
 

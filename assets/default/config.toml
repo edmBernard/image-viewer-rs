@@ -28,3 +28,5 @@ enabled = false
 scroll_behavior = "None"
 # Width of the grid (0: auto)
 grid_width = 0
+# Texture interpolation mode (Nearest or Bilinear)
+sampler_mode = "Nearest"
