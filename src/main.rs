@@ -61,8 +61,7 @@ enum ScrollBehavior {
     None,
 }
 
-// -----------------------------
-// Config Struct
+// MARK: Config Struct
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigShortcut {
     save_crop_image: KeyCode,
@@ -275,8 +274,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// -----------------------------
-// State Struct
+// MARK: State Struct
 #[derive(Debug, Resource)]
 struct MultiCursorEnabled(bool);
 
@@ -325,8 +323,7 @@ struct InitialImagesFilename(Vec<String>);
 #[derive(Resource, Debug)]
 struct RecordedPressedKey(Option<KeyCode>);
 
-// -----------------------------
-// Components
+// MARK: Components
 #[derive(Component)]
 struct Id(usize);
 
@@ -355,8 +352,7 @@ struct MyText;
 #[derive(Component)]
 struct MyHelp;
 
-// -----------------------------
-// Messages (buffered events)
+// MARK: Messages
 #[derive(Message)]
 struct MoveImageEvent;
 
