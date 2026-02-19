@@ -171,7 +171,7 @@ fn main() -> Result<()> {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Image Viewer 3000".to_string(),
-                    resolution: WindowResolution::new(800, 350),
+                    resolution: WindowResolution::new(1000, 350),
                     present_mode: PresentMode::AutoVsync,
                     ..default()
                 }),
@@ -193,6 +193,7 @@ fn main() -> Result<()> {
         .insert_resource(UiState {
             visible: true,
             settings_panel_visible: false,
+            image_list_visible: false,
         })
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
@@ -209,6 +210,7 @@ fn main() -> Result<()> {
             delta: Vec2::ZERO,
             pressed: false,
         })
+        .insert_resource(ImageOrder(Vec::new()))
         .add_systems(Startup, setup)
         .add_message::<LoadNewImageEvent>()
         .add_message::<NewImageLoadedEvent>()
@@ -221,11 +223,18 @@ fn main() -> Result<()> {
         .add_message::<ChangeTitleStyleEvent>()
         .add_message::<SaveSettingsEvent>()
         .add_message::<ChangeSamplerEvent>()
+        .add_message::<RemoveImageEvent>()
+        .add_message::<ReorderImagesEvent>()
         // Egui systems must run in EguiPrimaryContextPass (not Update)
         .add_systems(EguiPrimaryContextPass, configure_visuals.run_if(run_once))
         .add_systems(
             EguiPrimaryContextPass,
-            (ui_bottom_menu, ui_settings_menu.after(ui_bottom_menu)).run_if(in_state(MyAppState::Working)),
+            (
+                ui_bottom_menu,
+                ui_image_list_panel.after(ui_bottom_menu),
+                ui_settings_menu.after(ui_bottom_menu),
+            )
+                .run_if(in_state(MyAppState::Working)),
         )
         .add_systems(
             EguiPrimaryContextPass,
@@ -275,6 +284,8 @@ fn main() -> Result<()> {
                 save_settings,
                 change_image_title_style,
                 change_sampler,
+                on_remove_image,
+                on_reorder_images,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -293,6 +304,7 @@ struct MultiCursorEnabled(bool);
 struct UiState {
     visible: bool,
     settings_panel_visible: bool,
+    image_list_visible: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -333,6 +345,10 @@ struct InitialImagesFilename(Vec<String>);
 
 #[derive(Resource, Debug)]
 struct RecordedPressedKey(Option<KeyCode>);
+
+// Maps display slot -> image Id. Allows reordering images in the list panel.
+#[derive(Resource)]
+struct ImageOrder(Vec<usize>);
 
 // MARK: Components
 #[derive(Component)]
@@ -403,6 +419,12 @@ struct LoadNewImageEvent {
     path: String,
     index: usize,
 }
+
+#[derive(Message)]
+struct RemoveImageEvent(usize); // the Id of the image to remove
+
+#[derive(Message)]
+struct ReorderImagesEvent; // signal to recompute layout after reorder
 
 // MARK: Setup
 fn setup(
@@ -503,6 +525,7 @@ fn ui_bottom_menu(
                 |ui| {
                     egui::widgets::global_theme_preference_switch(ui);
                     ui.toggle_value(&mut ui_state.settings_panel_visible, "Settings");
+                    ui.toggle_value(&mut ui_state.image_list_visible, "Images");
                     ui.separator();
                     let mut scale = global_scale.0.log2();
 
@@ -728,6 +751,213 @@ fn ui_edit_short_cut(mut contexts: EguiContexts) {
     });
 }
 
+fn ui_image_list_panel(
+    mut contexts: EguiContexts,
+    ui_state: Res<UiState>,
+    mut image_order: ResMut<ImageOrder>,
+    image_path_query: Query<(&Id, &ImagePath), With<MyImage>>,
+    mut remove_image_evw: MessageWriter<RemoveImageEvent>,
+    mut reorder_evw: MessageWriter<ReorderImagesEvent>,
+) {
+    if !ui_state.image_list_visible {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    // Build a lookup from image Id -> short name
+    let mut name_map: Vec<(usize, String)> = Vec::new();
+    for (id, path) in &image_path_query {
+        let short = get_short_name(&path.0).unwrap_or("?");
+        name_map.push((id.0, short.to_string()));
+    }
+
+    egui::SidePanel::left("Image List")
+        .resizable(true)
+        .default_width(180.)
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Images");
+            });
+            ui.separator();
+
+            let mut to_remove: Option<usize> = None;
+            let mut from_slot: Option<usize> = None;
+            let mut to_slot: Option<usize> = None;
+
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // We iterate in display order
+                for (slot, &image_id) in image_order.0.iter().enumerate() {
+                    let name = name_map
+                        .iter()
+                        .find(|(id, _)| *id == image_id)
+                        .map(|(_, n)| n.as_str())
+                        .unwrap_or("?");
+
+                    let row_id = egui::Id::new("image_list_row").with(slot);
+
+                    // Row layout: [drag-source label] [remove button]
+                    // The remove button is outside the drag source so it receives clicks properly.
+                    ui.horizontal(|ui| {
+                        let response = ui
+                            .dnd_drag_source(row_id, slot, |ui| {
+                                ui.label(format!("{}. {}", slot + 1, name));
+                            })
+                            .response;
+
+                        if ui.button("\u{2716}").on_hover_text("Remove image").clicked() {
+                            to_remove = Some(image_id);
+                        }
+
+                        // Show a drop indicator line and determine insertion point
+                        if let (Some(pointer), Some(hovered_payload)) = (
+                            ui.input(|i| i.pointer.interact_pos()),
+                            response.dnd_hover_payload::<usize>(),
+                        ) {
+                            let rect = response.rect;
+                            let stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+                            let insert_slot = if *hovered_payload == slot {
+                                ui.painter().hline(rect.x_range(), rect.center().y, stroke);
+                                slot
+                            } else if pointer.y < rect.center().y {
+                                ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                                slot
+                            } else {
+                                ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                                slot + 1
+                            };
+
+                            if let Some(dragged_payload) = response.dnd_release_payload::<usize>() {
+                                from_slot = Some(*dragged_payload);
+                                to_slot = Some(insert_slot);
+                            }
+                        }
+                    });
+                }
+            });
+
+            // Handle reorder (adjust index when moving within the same list)
+            if let (Some(src), Some(mut dst)) = (from_slot, to_slot) {
+                dst -= (src < dst) as usize;
+                if src != dst {
+                    let item = image_order.0.remove(src);
+                    image_order.0.insert(dst, item);
+                    reorder_evw.write(ReorderImagesEvent);
+                }
+            }
+
+            // Handle removal
+            if let Some(id_to_remove) = to_remove {
+                remove_image_evw.write(RemoveImageEvent(id_to_remove));
+            }
+        });
+}
+
+fn on_remove_image(
+    mut remove_evr: MessageReader<RemoveImageEvent>,
+    mut commands: Commands,
+    mut query_by_id: Query<(Entity, &mut Id)>,
+    mut image_order: ResMut<ImageOrder>,
+    mut move_image_evw: MessageWriter<MoveImageEvent>,
+    mut fit_to_screen_evw: MessageWriter<FitToScreen>,
+) {
+    for ev in remove_evr.read() {
+        let target_id = ev.0;
+
+        // Despawn all entity with matching Id
+        for (entity, id) in &query_by_id {
+            if id.0 == target_id {
+                commands.entity(entity).despawn();
+                continue;
+            }
+        }
+
+        // Remove from ImageOrder, keeping remaining in display order
+        image_order.0.retain(|&id| id != target_id);
+
+        // Reassign contiguous Ids on remaining entities using two passes to avoid collisions.
+        let old_ids: Vec<usize> = image_order.0.clone();
+        let count = old_ids.len();
+
+        // Pass 1: shift to temporary range
+        for &old_id in &old_ids {
+            let temp_id = old_id + count + 1;
+            for (_, mut id) in &mut query_by_id {
+                if id.0 == old_id {
+                    id.0 = temp_id;
+                    continue;
+                }
+            }
+        }
+
+        // Pass 2: assign final contiguous values
+        for (new_idx, &old_id) in old_ids.iter().enumerate() {
+            let temp_id = old_id + count + 1;
+            for (_, mut id) in &mut query_by_id {
+                if id.0 == temp_id {
+                    id.0 = new_idx;
+                    continue;
+                }
+            }
+        }
+
+        // Rebuild ImageOrder as contiguous [0, 1, 2, ...]
+        let count = image_order.0.len();
+        image_order.0 = (0..count).collect();
+
+        fit_to_screen_evw.write(FitToScreen);
+        move_image_evw.write(MoveImageEvent);
+    }
+}
+
+fn on_reorder_images(
+    mut reorder_evr: MessageReader<ReorderImagesEvent>,
+    mut image_order: ResMut<ImageOrder>,
+    mut query_by_id: Query<&mut Id>,
+    mut move_image_evw: MessageWriter<MoveImageEvent>,
+    mut reset_vis_evw: MessageWriter<ResetVisibilityEvent>,
+) {
+    if reorder_evr.is_empty() {
+        return;
+    }
+    reorder_evr.clear();
+
+    // After a drag-and-drop reorder, ImageOrder[new_slot] = old_id.
+    // We need to reassign Id components so that each entity's Id matches its new display slot.
+    // A direct loop fails when two slots swap because the first rename collides with the second.
+    // Fix: two passes — first shift all Ids to a temporary range, then assign final values.
+    let order_snapshot: Vec<usize> = image_order.0.clone();
+    let count = order_snapshot.len();
+
+    // Pass 1: rename old_id -> old_id + count (temporary, guaranteed unique)
+    for &old_id in &order_snapshot {
+        let temp_id = old_id + count;
+        for mut id in &mut query_by_id {
+            if id.0 == old_id {
+                id.0 = temp_id;
+                continue;
+            }
+        }
+    }
+
+    // Pass 2: rename temp_id -> new_idx (final contiguous value)
+    for (new_idx, &old_id) in order_snapshot.iter().enumerate() {
+        let temp_id = old_id + count;
+        for mut id in &mut query_by_id {
+            if id.0 == temp_id {
+                id.0 = new_idx;
+                continue;
+            }
+        }
+    }
+
+    // Rebuild ImageOrder as contiguous [0, 1, 2, ...]
+    image_order.0 = (0..count).collect();
+
+    move_image_evw.write(MoveImageEvent);
+    reset_vis_evw.write(ResetVisibilityEvent);
+}
+
 fn on_load_image(
     mut load_evr: MessageReader<LoadNewImageEvent>,
     mut loaded_evw: MessageWriter<NewImageLoadedEvent>,
@@ -802,6 +1032,7 @@ fn on_image_loaded(
     font_query: Query<&FontHandle>,
     layout_state: Res<GridLayoutState>,
     mut is_new_batch: ResMut<NewImageBatch>,
+    mut image_order: ResMut<ImageOrder>,
 ) {
     for ev in load_image_evr.read() {
         let font = font_query.single().unwrap();
@@ -810,6 +1041,7 @@ fn on_image_loaded(
             for entity in &images {
                 commands.entity(entity).despawn();
             }
+            image_order.0.clear();
             is_new_batch.0 = false;
         }
 
@@ -859,6 +1091,9 @@ fn on_image_loaded(
             Id(ev.index),
             MyText,
         ));
+
+        // Track the new image in display order
+        image_order.0.push(ev.index);
 
         let mut visibility = help_query.single_mut().unwrap();
         *visibility = Visibility::Hidden;
