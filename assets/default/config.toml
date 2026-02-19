@@ -11,7 +11,7 @@ switch_cursor = "KeyC"
 switch_layout = "KeyL"
 # Shortcut to rotate all images
 rotate_images = "KeyR"
-# Shortcut to add new images instead of reseting
+# Shortcut to toggle add mode (dropped images are added instead of replacing)
 add_images = "KeyQ"
 
 [text]

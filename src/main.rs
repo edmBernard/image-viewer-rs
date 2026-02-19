@@ -42,7 +42,7 @@ const HELP_STRING: &'static str = "Keyboard Shortcut:
     Z + Right/Left clic: zoom in/out the hovered image only
     R: Rotate all images CW
     E + Right/Left clic: rotate CW/CCW the hovered image only
-    A + drop file : Add new images to the comparison
+    Q: Toggle 'Add Mode' (dropped images are added instead of replacing)
     C: Toggle multi cursor
     P: Save image to disk with the displayed crop (suffixed by _crop)
     H: Toggle Interface
@@ -199,6 +199,7 @@ fn main() -> Result<()> {
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(GlobalRotation(0.))
         .insert_resource(NewImageBatch(true))
+        .insert_resource(AddMode(false))
         .insert_resource(MultiCursorEnabled(false))
         .insert_resource(RecordedPressedKey(None))
         .insert_resource(GridLayoutState {
@@ -280,6 +281,7 @@ fn main() -> Result<()> {
                 reset_scales,
                 fit_to_screen,
                 key_save_cropped,
+                key_toggle_add_mode,
                 save_cropped,
                 save_settings,
                 change_image_title_style,
@@ -329,6 +331,9 @@ struct GlobalRotation(f32);
 
 #[derive(Resource)]
 struct NewImageBatch(bool);
+
+#[derive(Resource)]
+struct AddMode(bool);
 
 #[derive(Resource)]
 struct MouseState {
@@ -513,6 +518,7 @@ fn ui_bottom_menu(
     mut save_cropped_evw: MessageWriter<SaveCropped>,
     mut reset_scales_evw: MessageWriter<ResetScales>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
+    mut add_mode: ResMut<AddMode>,
 ) {
     if ui_state.visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -583,6 +589,10 @@ fn ui_bottom_menu(
                     {
                         save_cropped_evw.write(SaveCropped);
                     }
+
+                    ui.separator();
+                    ui.toggle_value(&mut add_mode.0, "Add")
+                        .on_hover_text("When enabled, dropped images are added instead of replacing");
                 },
             );
         });
@@ -1695,6 +1705,12 @@ fn key_save_cropped(
     }
 }
 
+fn key_toggle_add_mode(keys: Res<ButtonInput<KeyCode>>, config: Res<Config>, mut add_mode: ResMut<AddMode>) {
+    if keys.just_pressed(config.shortcut.add_images) {
+        add_mode.0 = !add_mode.0;
+    }
+}
+
 fn record_pressed_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut recorded_key: ResMut<RecordedPressedKey>,
@@ -1937,8 +1953,7 @@ fn file_drop(
     mut dnd_evr: MessageReader<FileDragAndDrop>,
     mut is_new_batch: ResMut<NewImageBatch>,
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
-    keys: Res<ButtonInput<KeyCode>>,
-    config: Res<Config>,
+    add_mode: Res<AddMode>,
     sprite_query: Query<&Id, With<MyImage>>,
 ) {
     if dnd_evr.is_empty() {
@@ -1960,7 +1975,7 @@ fn file_drop(
     if some_file_dropped {
         let mut count: usize = sprite_query.iter().count();
         for (index, filename) in images_filename.into_iter().enumerate() {
-            if !keys.pressed(config.shortcut.add_images) {
+            if !add_mode.0 {
                 is_new_batch.0 = true;
                 count = 0;
             }
@@ -2038,7 +2053,12 @@ mod macos_dock_drop {
     }
 }
 
-fn poll_dock_drop_queue(mut is_new_batch: ResMut<NewImageBatch>, mut load_image_evw: MessageWriter<LoadNewImageEvent>) {
+fn poll_dock_drop_queue(
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    add_mode: Res<AddMode>,
+    sprite_query: Query<&Id, With<MyImage>>,
+) {
     let Ok(mut queue) = DOCK_DROP_QUEUE.lock() else {
         return;
     };
@@ -2049,10 +2069,15 @@ fn poll_dock_drop_queue(mut is_new_batch: ResMut<NewImageBatch>, mut load_image_
     let paths: Vec<String> = queue.drain(..).collect();
     drop(queue);
 
-    // Dock drops always replace the current images (like a fresh load)
-    is_new_batch.0 = true;
+    let count: usize = if add_mode.0 { sprite_query.iter().count() } else { 0 };
+    if !add_mode.0 {
+        is_new_batch.0 = true;
+    }
     for (index, path) in paths.into_iter().enumerate() {
-        load_image_evw.write(LoadNewImageEvent { path, index });
+        load_image_evw.write(LoadNewImageEvent {
+            path,
+            index: count + index,
+        });
     }
 }
 
