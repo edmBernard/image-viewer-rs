@@ -530,8 +530,8 @@ fn ui_bottom_menu(
                 egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
                 |ui| {
                     egui::widgets::global_theme_preference_switch(ui);
-                    ui.toggle_value(&mut ui_state.settings_panel_visible, "Settings");
-                    ui.toggle_value(&mut ui_state.image_list_visible, "Images");
+                    ui.toggle_value(&mut ui_state.settings_panel_visible, "\u{2699}");
+                    ui.toggle_value(&mut ui_state.image_list_visible, "\u{2630}");
                     ui.separator();
                     let mut scale = global_scale.0.log2();
 
