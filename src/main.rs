@@ -8,6 +8,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
@@ -23,7 +24,7 @@ use image::{ColorType, DynamicImage, ImageFormat, SubImage};
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
-type Result<T> = ::std::result::Result<T, Box<dyn::std::error::Error>>;
+type Result<T> = ::std::result::Result<T, Box<dyn ::std::error::Error>>;
 
 #[derive(Parser, Debug)]
 #[clap(version, long_about = None)]
@@ -163,22 +164,31 @@ fn main() -> Result<()> {
 
     println!("Config: {:?}", config_data);
 
-    App::new()
-        .add_plugins((
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Image Viewer 3000".to_string(),
-                        resolution: WindowResolution::new(800, 350),
-                        present_mode: PresentMode::AutoVsync,
-                        ..default()
-                    }),
+    let mut app = App::new();
+    // add_plugins creates the winit EventLoop which registers the WinitApplicationDelegate class
+    app.add_plugins((
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Image Viewer 3000".to_string(),
+                    resolution: WindowResolution::new(800, 350),
+                    present_mode: PresentMode::AutoVsync,
                     ..default()
-                })
-                .set(ImagePlugin::default()),
-            EguiPlugin::default(),
-        ))
-        .insert_state(MyAppState::Working)
+                }),
+                ..default()
+            })
+            .set(ImagePlugin::default()),
+        EguiPlugin::default(),
+    ));
+
+    // Inject the macOS dock drop handler before the event loop starts.
+    // Must happen after add_plugins (class exists) but before run() (NSApp.run() called).
+    // On cold launch, macOS calls application:openURLs: before applicationDidFinishLaunching:,
+    // so the method must be on the class before the Cocoa event loop begins.
+    #[cfg(target_os = "macos")]
+    macos_dock_drop::inject_open_urls_handler();
+
+    app.insert_state(MyAppState::Working)
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState {
             visible: true,
@@ -269,6 +279,7 @@ fn main() -> Result<()> {
                 .run_if(in_state(MyAppState::Working)),
         )
         .add_systems(Update, record_pressed_key.run_if(in_state(MyAppState::EditShortCut)))
+        .add_systems(Update, poll_dock_drop_queue.run_if(in_state(MyAppState::Working)))
         .run();
 
     Ok(())
@@ -1728,6 +1739,86 @@ fn file_drop(
 
 fn bound(vec: Vec2, rect: Rect) -> Vec2 {
     Vec2::new(vec.x.clamp(rect.min.x, rect.max.x), vec.y.clamp(rect.min.y, rect.max.y))
+}
+
+// MARK: macOS Dock Drop
+// macOS requires the NSApplicationDelegate to implement application:openURLs: for dock icon
+// drops and "Open With" to work. Winit 0.30.x doesn't implement this, so we inject the method
+// into WinitApplicationDelegate at runtime. When winit 0.31+ lands (which exposes delegate
+// registration), this workaround can be removed.
+
+static DOCK_DROP_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+mod macos_dock_drop {
+    use objc2::ffi;
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::sel;
+    use objc2_foundation::{NSArray, NSURL};
+
+    // The handler that the ObjC runtime will call for application:openURLs:
+    // Signature: void(id self, SEL _cmd, id application, id urls)
+    unsafe extern "C" fn handle_open_urls(_this: &AnyObject, _cmd: Sel, _sender: &AnyObject, urls: &NSArray<NSURL>) {
+        let mut paths = Vec::new();
+        for i in 0..urls.len() {
+            let Some(url) = urls.get(i) else { continue };
+            let Some(ns_path) = (unsafe { url.path() }) else {
+                continue;
+            };
+            let path = ns_path.to_string();
+            println!("macOS dock drop: {}", path);
+            paths.push(path);
+        }
+
+        if !paths.is_empty() {
+            let Ok(mut queue) = super::DOCK_DROP_QUEUE.lock() else {
+                return;
+            };
+            queue.extend(paths);
+        }
+    }
+
+    // Inject application:openURLs: into WinitApplicationDelegate at runtime.
+    // Must be called after the event loop is created (so the class is registered).
+    pub fn inject_open_urls_handler() {
+        let Some(cls) = AnyClass::get("WinitApplicationDelegate") else {
+            println!("macOS dock drop: WinitApplicationDelegate class not found, skipping");
+            return;
+        };
+
+        let sel = sel!(application:openURLs:);
+        // Type encoding: void(id, SEL, id, id) = "v@:@@"
+        let types = c"v@:@@";
+        let imp: Imp = unsafe { std::mem::transmute(handle_open_urls as *const ()) };
+        let cls_ptr = cls as *const AnyClass as *mut ffi::objc_class;
+
+        // SAFETY: cls_ptr points to a valid, registered ObjC class. The selector, type encoding,
+        // and function signature all match the application:openURLs: delegate method.
+        let ok = unsafe { ffi::class_addMethod(cls_ptr, sel.as_ptr(), Some(imp), types.as_ptr()) };
+        if ok {
+            println!("macOS dock drop: injected application:openURLs: handler");
+        } else {
+            println!("macOS dock drop: failed to inject handler (method may already exist)");
+        }
+    }
+}
+
+fn poll_dock_drop_queue(mut is_new_batch: ResMut<NewImageBatch>, mut load_image_evw: MessageWriter<LoadNewImageEvent>) {
+    let Ok(mut queue) = DOCK_DROP_QUEUE.lock() else {
+        return;
+    };
+    if queue.is_empty() {
+        return;
+    }
+
+    let paths: Vec<String> = queue.drain(..).collect();
+    drop(queue);
+
+    // Dock drops always replace the current images (like a fresh load)
+    is_new_batch.0 = true;
+    for (index, path) in paths.into_iter().enumerate() {
+        load_image_evw.write(LoadNewImageEvent { path, index });
+    }
 }
 
 fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
