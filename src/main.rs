@@ -1,13 +1,15 @@
 // #![allow(unused_variables)]
 #![windows_subsystem = "windows"]
 
+mod review;
+
 use std::f32::consts::{PI, TAU};
 use std::fs::canonicalize;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -212,6 +214,7 @@ fn main() -> Result<()> {
             pressed: false,
         })
         .insert_resource(ImageOrder(Vec::new()))
+        .insert_resource(ReviewState::default())
         .add_systems(Startup, setup)
         .add_message::<LoadNewImageEvent>()
         .add_message::<NewImageLoadedEvent>()
@@ -226,6 +229,9 @@ fn main() -> Result<()> {
         .add_message::<ChangeSamplerEvent>()
         .add_message::<RemoveImageEvent>()
         .add_message::<ReorderImagesEvent>()
+        .add_message::<NavigateReviewEvent>()
+        .add_message::<RefreshReviewEvent>()
+        .add_message::<ActivateReviewEvent>()
         // Egui systems must run in EguiPrimaryContextPass (not Update)
         .add_systems(EguiPrimaryContextPass, configure_visuals.run_if(run_once))
         .add_systems(
@@ -234,6 +240,7 @@ fn main() -> Result<()> {
                 ui_bottom_menu,
                 ui_image_list_panel.after(ui_bottom_menu),
                 ui_settings_menu.after(ui_bottom_menu),
+                ui_review_panel.after(ui_bottom_menu),
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -288,6 +295,15 @@ fn main() -> Result<()> {
                 change_sampler,
                 on_remove_image,
                 on_reorder_images,
+            )
+                .run_if(in_state(MyAppState::Working)),
+        )
+        .add_systems(
+            Update,
+            (
+                on_navigate_review,
+                on_activate_review,
+                on_refresh_review,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -354,6 +370,17 @@ struct RecordedPressedKey(Option<KeyCode>);
 // Maps display slot -> image Id. Allows reordering images in the list panel.
 #[derive(Resource)]
 struct ImageOrder(Vec<usize>);
+
+#[derive(Resource, Default)]
+struct ReviewState {
+    enabled: bool,
+    directory: String,
+    cell_patterns: Vec<review::CellPattern>,
+    radixes: Vec<String>,
+    current_index: usize,
+    editable_patterns: Vec<String>,
+    error: Option<String>,
+}
 
 // MARK: Components
 #[derive(Component)]
@@ -430,6 +457,15 @@ struct RemoveImageEvent(usize); // the Id of the image to remove
 
 #[derive(Message)]
 struct ReorderImagesEvent; // signal to recompute layout after reorder
+
+#[derive(Message)]
+struct NavigateReviewEvent(i32); // +1 next, -1 previous
+
+#[derive(Message)]
+struct RefreshReviewEvent;
+
+#[derive(Message)]
+struct ActivateReviewEvent;
 
 // MARK: Setup
 fn setup(
@@ -519,6 +555,8 @@ fn ui_bottom_menu(
     mut reset_scales_evw: MessageWriter<ResetScales>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
     mut add_mode: ResMut<AddMode>,
+    mut review_state: ResMut<ReviewState>,
+    mut activate_evw: MessageWriter<ActivateReviewEvent>,
 ) {
     if ui_state.visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -593,6 +631,13 @@ fn ui_bottom_menu(
                     ui.separator();
                     ui.toggle_value(&mut add_mode.0, "Add")
                         .on_hover_text("When enabled, dropped images are added instead of replacing");
+
+                    ui.separator();
+                    ui.toggle_value(&mut review_state.enabled, "Review")
+                        .on_hover_text("Review mode: navigate through similar images");
+                    if review_state.enabled && review_state.radixes.is_empty() {
+                        activate_evw.write(ActivateReviewEvent);
+                    }
                 },
             );
         });
@@ -1040,7 +1085,6 @@ fn on_image_loaded(
     images: Query<Entity, With<Id>>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
-    layout_state: Res<GridLayoutState>,
     mut is_new_batch: ResMut<NewImageBatch>,
     mut image_order: ResMut<ImageOrder>,
 ) {
@@ -1055,23 +1099,13 @@ fn on_image_loaded(
             is_new_batch.0 = false;
         }
 
-        let visibility = match layout_state.layout {
-            GridLayout::Stack => {
-                if ev.index != layout_state.index {
-                    Visibility::Hidden
-                } else {
-                    Visibility::Visible
-                }
-            }
-            _ => Visibility::Visible,
-        };
-
+        // Start hidden; on_move_image will make it visible after positioning
         commands.spawn((
             Sprite {
                 image: ev.handle.clone(),
                 ..default()
             },
-            visibility,
+            Visibility::Hidden,
             Id(ev.index),
             Scale(1.),
             Position(Vec2::ZERO),
@@ -1097,7 +1131,7 @@ fn on_image_loaded(
                 position_type: PositionType::Absolute,
                 ..default()
             },
-            visibility,
+            Visibility::Hidden,
             Id(ev.index),
             MyText,
         ));
@@ -1105,8 +1139,8 @@ fn on_image_loaded(
         // Track the new image in display order
         image_order.0.push(ev.index);
 
-        let mut visibility = help_query.single_mut().unwrap();
-        *visibility = Visibility::Hidden;
+        let mut help_visibility = help_query.single_mut().unwrap();
+        *help_visibility = Visibility::Hidden;
     }
 }
 
@@ -1114,7 +1148,10 @@ fn on_move_image(
     mut move_image_evr: MessageReader<MoveImageEvent>,
     windows: Query<&Window>,
     assets: Res<Assets<Image>>,
-    mut sprite_position: Query<(&Id, &Position, &Scale, &Rotation, &mut Transform, &mut Sprite), With<MyImage>>,
+    mut sprite_position: Query<
+        (&Id, &Position, &Scale, &Rotation, &mut Transform, &mut Sprite, &mut Visibility),
+        With<MyImage>,
+    >,
     global_scale: Res<GlobalScale>,
     global_rotation: Res<GlobalRotation>,
     layout_state: Res<GridLayoutState>,
@@ -1129,7 +1166,7 @@ fn on_move_image(
 
     let window = windows.single().unwrap();
     let num_images = sprite_position.iter().count();
-    for (id, position, scale, rotation, mut transform, mut sprite) in &mut sprite_position {
+    for (id, position, scale, rotation, mut transform, mut sprite, mut visibility) in &mut sprite_position {
         let image_handle = sprite.image.clone();
         let Some(image) = assets.get(&image_handle) else {
             continue;
@@ -1163,6 +1200,18 @@ fn on_move_image(
         );
 
         sprite.rect = Some(cell.intersect(image_crop));
+
+        // Make visible after positioning (sprites start hidden to avoid flash at native resolution)
+        *visibility = match layout_state.layout {
+            GridLayout::Stack => {
+                if id.0 == layout_state.index {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                }
+            }
+            _ => Visibility::Visible,
+        };
     }
 
     let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window, config.misc.grid_width);
@@ -1174,7 +1223,7 @@ fn on_move_image(
 fn on_move_image_title(
     mut move_image_evr: MessageReader<MoveImageEvent>,
     windows: Query<&Window>,
-    mut text_query: Query<(&Id, &mut Node), With<MyText>>,
+    mut text_query: Query<(&Id, &mut Node, &mut Visibility), With<MyText>>,
     layout_state: Res<GridLayoutState>,
     config: Res<Config>,
 ) {
@@ -1186,10 +1235,20 @@ fn on_move_image_title(
     let num_images = text_query.iter().count();
     let window = windows.single().unwrap();
 
-    for (id, mut node) in &mut text_query {
+    for (id, mut node, mut visibility) in &mut text_query {
         let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
         node.top = Val::Px(cell_offset.y + 2.);
         node.left = Val::Px(cell_offset.x + 5.);
+        *visibility = match layout_state.layout {
+            GridLayout::Stack => {
+                if id.0 == layout_state.index {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                }
+            }
+            _ => Visibility::Visible,
+        };
     }
 }
 
@@ -1650,14 +1709,12 @@ fn reset_scales(
 
 fn on_image_spawned(
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
-    mut reset_vis_evw: MessageWriter<ResetVisibilityEvent>,
     sprite_query: Query<&Id, Added<MyImage>>,
 ) {
     if sprite_query.iter().count() == 0 {
         return;
     }
 
-    reset_vis_evw.write(ResetVisibilityEvent);
     fit_to_screen_evw.write(FitToScreen);
 }
 
@@ -1669,6 +1726,7 @@ fn fit_to_screen(
     mut sprite_query: Query<(&Id, &Sprite, &mut Scale, &mut Position), With<MyImage>>,
     layout_state: Res<GridLayoutState>,
     config: Res<Config>,
+    mut move_image_evw: MessageWriter<MoveImageEvent>,
 ) {
     for _ev in fit_to_screen_evr.read() {
         let window = windows.single().unwrap();
@@ -1692,6 +1750,7 @@ fn fit_to_screen(
             }
             position.0 = Vec2::ZERO;
         }
+        move_image_evw.write(MoveImageEvent);
     }
 }
 
@@ -2079,6 +2138,164 @@ fn poll_dock_drop_queue(
             index: count + index,
         });
     }
+}
+
+// MARK: Review Mode
+
+fn on_navigate_review(
+    mut navigate_evr: MessageReader<NavigateReviewEvent>,
+    mut review_state: ResMut<ReviewState>,
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+) {
+    for ev in navigate_evr.read() {
+        if review_state.radixes.is_empty() {
+            continue;
+        }
+        let count = review_state.radixes.len() as i32;
+        let new_index = (review_state.current_index as i32 + ev.0).rem_euclid(count) as usize;
+        review_state.current_index = new_index;
+
+        let radix = &review_state.radixes[new_index];
+        let directory = PathBuf::from(&review_state.directory);
+        let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
+
+        is_new_batch.0 = true;
+        for (index, file) in files.into_iter().enumerate() {
+            let Some(path) = file else { continue };
+            load_image_evw.write(LoadNewImageEvent { path, index });
+        }
+    }
+}
+
+fn on_activate_review(
+    mut activate_evr: MessageReader<ActivateReviewEvent>,
+    mut review_state: ResMut<ReviewState>,
+    image_query: Query<&ImagePath, With<MyImage>>,
+) {
+    for _ev in activate_evr.read() {
+        review_state.error = None;
+        let paths: Vec<String> = image_query.iter().map(|p| p.0.clone()).collect();
+        if paths.len() < 2 {
+            review_state.error = Some("Review mode needs at least 2 images".to_string());
+            continue;
+        }
+
+        // Extract directory from the first image path
+        let Some(dir) = Path::new(&paths[0]).parent() else {
+            review_state.error = Some("Cannot determine directory from image path".to_string());
+            continue;
+        };
+
+        // Get just the filenames for pattern extraction
+        let filenames: Vec<String> = paths
+            .iter()
+            .filter_map(|p| Path::new(p).file_name().and_then(|f| f.to_str()).map(String::from))
+            .collect();
+        let filename_refs: Vec<&str> = filenames.iter().map(|s| s.as_str()).collect();
+
+        let Some(result) = review::extract_patterns(&filename_refs) else {
+            review_state.error = Some("No common pattern found in filenames".to_string());
+            continue;
+        };
+
+        let radixes = review::scan_radixes(dir, &result.cell_patterns);
+        let current_index = radixes.iter().position(|r| r == &result.radix).unwrap_or(0);
+
+        review_state.enabled = true;
+        review_state.directory = dir.to_string_lossy().to_string();
+        review_state.editable_patterns = result.cell_patterns.iter().map(|cp| cp.regex_str.clone()).collect();
+        review_state.cell_patterns = result.cell_patterns;
+        review_state.radixes = radixes;
+        review_state.current_index = current_index;
+    }
+}
+
+fn on_refresh_review(
+    mut refresh_evr: MessageReader<RefreshReviewEvent>,
+    mut review_state: ResMut<ReviewState>,
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+) {
+    for _ev in refresh_evr.read() {
+        // Rebuild cell_patterns from editable_patterns
+        let mut new_patterns = Vec::new();
+        for (i, regex_str) in review_state.editable_patterns.iter().enumerate() {
+            let old = review_state.cell_patterns.get(i);
+            let label = old.map(|cp| cp.label.clone()).unwrap_or_default();
+            let tail = old.map(|cp| cp.tail.clone()).unwrap_or_default();
+            new_patterns.push(review::CellPattern {
+                label,
+                tail,
+                regex_str: regex_str.clone(),
+            });
+        }
+        review_state.cell_patterns = new_patterns;
+
+        let directory = PathBuf::from(&review_state.directory);
+        review_state.radixes = review::scan_radixes(&directory, &review_state.cell_patterns);
+        if review_state.current_index >= review_state.radixes.len() {
+            review_state.current_index = 0;
+        }
+
+        // Reload images for the current radix
+        if let Some(radix) = review_state.radixes.get(review_state.current_index) {
+            let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
+            is_new_batch.0 = true;
+            for (index, file) in files.into_iter().enumerate() {
+                let Some(path) = file else { continue };
+                load_image_evw.write(LoadNewImageEvent { path, index });
+            }
+        }
+    }
+}
+
+fn ui_review_panel(
+    mut contexts: EguiContexts,
+    mut review_state: ResMut<ReviewState>,
+    mut navigate_evw: MessageWriter<NavigateReviewEvent>,
+    mut refresh_evw: MessageWriter<RefreshReviewEvent>,
+    mut activate_evw: MessageWriter<ActivateReviewEvent>,
+    ui_state: Res<UiState>,
+) {
+    if !ui_state.visible || !review_state.enabled {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    egui::TopBottomPanel::bottom("review_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            if let Some(error) = &review_state.error {
+                ui.colored_label(egui::Color32::from_rgb(255, 150, 100), error.as_str());
+            } else {
+                if ui.button("\u{25C0}").clicked() {
+                    navigate_evw.write(NavigateReviewEvent(-1));
+                }
+                if ui.button("\u{25B6}").clicked() {
+                    navigate_evw.write(NavigateReviewEvent(1));
+                }
+
+                let total = review_state.radixes.len();
+                let current = review_state.current_index;
+                let radix_name = review_state.radixes.get(current).cloned().unwrap_or_default();
+                ui.label(format!("{}/{}: {}", current + 1, total, radix_name));
+
+                ui.separator();
+
+                for pattern in review_state.editable_patterns.iter_mut() {
+                    ui.add(egui::TextEdit::singleline(pattern).desired_width(200.0));
+                    ui.separator();
+                }
+
+                if ui.button("\u{21BB}").on_hover_text("Reload directory with current regexes").clicked() {
+                    refresh_evw.write(RefreshReviewEvent);
+                }
+            }
+
+            if ui.button("\u{2672}").on_hover_text("Recompute patterns from open images").clicked() {
+                activate_evw.write(ActivateReviewEvent);
+            }
+        });
+    });
 }
 
 fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
