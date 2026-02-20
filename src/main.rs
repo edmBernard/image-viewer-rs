@@ -35,7 +35,7 @@ struct Args {
     images: Vec<String>,
 }
 
-const HELP_STRING: &'static str = "Keyboard Shortcut:
+const HELP_STRING: &str = "Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
     Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
     Shift + 1, 2, 3, ...: Move Image on top
@@ -1430,8 +1430,8 @@ fn change_global_rotation(
 ) {
     if keys.just_pressed(config.shortcut.rotate_images) {
         global_rotation.0 += 1.;
-    };
     move_image_evw.write(MoveImageEvent);
+    };
 }
 
 fn change_global_zoom(
@@ -1757,10 +1757,10 @@ fn fit_to_screen(
 fn key_save_cropped(
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<Config>,
-    mut save_scropped_evw: MessageWriter<SaveCropped>,
+    mut save_cropped_evw: MessageWriter<SaveCropped>,
 ) {
     if keys.just_pressed(config.shortcut.save_crop_image) {
-        save_scropped_evw.write(SaveCropped);
+        save_cropped_evw.write(SaveCropped);
     }
 }
 
@@ -1795,10 +1795,10 @@ fn insert_suffix(path: &Path, suffix: &str) -> Option<std::path::PathBuf> {
 }
 
 fn save_cropped(
-    mut save_scropped_evr: MessageReader<SaveCropped>,
+    mut save_cropped_evr: MessageReader<SaveCropped>,
     image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
 ) {
-    for _ev in save_scropped_evr.read() {
+    for _ev in save_cropped_evr.read() {
         for (path, sprite) in &image_query {
             // Get Input image
             let input_path = Path::new(&path.0);
@@ -2298,7 +2298,7 @@ fn ui_review_panel(
     });
 }
 
-fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
+fn check_all_images_exist(images: &[String]) -> Result<Vec<String>> {
     let mut images_absolute = Vec::new();
     for image_filename in images {
         let input_path = Path::new(&image_filename);
@@ -2326,6 +2326,6 @@ fn check_all_images_exist(images: &Vec<String>) -> Result<Vec<String>> {
     Ok(images_absolute)
 }
 
-fn get_short_name(path: &String) -> Option<&str> {
+fn get_short_name(path: &str) -> Option<&str> {
     Path::new(path).file_name()?.to_str()
 }

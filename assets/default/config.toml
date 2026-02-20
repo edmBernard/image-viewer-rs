@@ -1,9 +1,9 @@
 [shortcut]
 # Shortcut to save crop image shown on screen
 save_crop_image = "KeyP"
-# Shortcut to toggle the multicursor
+# Shortcut modifier for local zoom (hold + click to zoom individual image)
 local_zoom_modifier = "KeyW"
-# Shortcut to toggle the multicursor
+# Shortcut modifier for local rotation (hold + click to rotate individual image)
 local_rotate_modifier = "KeyE"
 # Shortcut to toggle the multicursor
 switch_cursor = "KeyC"
