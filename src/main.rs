@@ -199,7 +199,7 @@ fn main() -> Result<()> {
         })
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
-        .insert_resource(GlobalRotation(0.))
+        .insert_resource(GlobalRotation(0))
         .insert_resource(NewImageBatch(true))
         .insert_resource(AddMode(false))
         .insert_resource(MultiCursorEnabled(false))
@@ -343,7 +343,7 @@ struct GridLayoutState {
 struct GlobalScale(f32);
 
 #[derive(Resource)]
-struct GlobalRotation(f32);
+struct GlobalRotation(i32);
 
 #[derive(Resource)]
 struct NewImageBatch(bool);
@@ -394,7 +394,7 @@ struct Position(Vec2);
 
 // Rotation in quarter turn (1 is 1 turn)
 #[derive(Component)]
-struct Rotation(f32);
+struct Rotation(i32);
 
 #[derive(Component)]
 struct ImagePath(String);
@@ -1033,6 +1033,7 @@ fn on_load_image(
         let mut reader = image::ImageReader::with_format(buf, format);
 
         // Remove the memory limit on image size we can read
+        // This is required to process large images that would otherwise be rejected by the image crate
         reader.no_limits();
 
         let Some(image) = reader.decode().ok() else {
@@ -1109,7 +1110,7 @@ fn on_image_loaded(
             Id(ev.index),
             Scale(1.),
             Position(Vec2::ZERO),
-            Rotation(0.),
+            Rotation(0),
             ImagePath(ev.path.clone()),
             MyImage,
         ));
@@ -1180,12 +1181,12 @@ fn on_move_image(
             * Vec3::new(1., -1., 1.);
         transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
         let rotation_total = global_rotation.0 + rotation.0;
-        transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation_total);
+        transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation_total as f32);
 
-        let delta = Vec2::from_angle(-PI / 2. * rotation_total)
+        let delta = Vec2::from_angle(-PI / 2. * rotation_total as f32)
             .rotate(position.0 + mouse_state.delta / (scale.0 * global_scale.0));
         let image_crop = Rect::from_center_size(image_size / 2., image_size);
-        let rotated_cell_size = if rotation_total % 2. == 0. {
+        let rotated_cell_size = if rotation_total % 2 == 0 {
             cell_size
         } else {
             Vec2::new(cell_size.y, cell_size.x)
@@ -1429,7 +1430,7 @@ fn change_global_rotation(
     mut global_rotation: ResMut<GlobalRotation>,
 ) {
     if keys.just_pressed(config.shortcut.rotate_images) {
-        global_rotation.0 += 1.;
+        global_rotation.0 += 1;
     move_image_evw.write(MoveImageEvent);
     };
 }
@@ -1493,9 +1494,9 @@ fn change_rotation_individually(
         };
 
         let rotate_turn = if buttons.just_pressed(MouseButton::Left) {
-            1.
+            1
         } else {
-            -1.
+            -1
         };
 
         for (id, mut rotate) in &mut sprite_query {
@@ -1732,22 +1733,20 @@ fn fit_to_screen(
         let window = windows.single().unwrap();
         let num_images = sprite_query.iter().count();
 
+        let mut first = true;
         for (id, sprite, mut scale, mut position) in &mut sprite_query {
             let Some(image) = assets.get(&sprite.image) else {
                 continue;
             };
             let image_size = image.size().as_vec2();
-
             let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+            let factor = f32::min(cell_size.x / image_size.x, cell_size.y / image_size.y);
 
-            let factor = cell_size / image_size;
-
-            if id.0 == 0 {
-                global_scale.0 = f32::min(factor.x, factor.y);
-                scale.0 = 1.0;
-            } else {
-                scale.0 = f32::min(factor.x, factor.y) / global_scale.0;
+            if first {
+                global_scale.0 = factor;
+                first = false;
             }
+            scale.0 = factor / global_scale.0;
             position.0 = Vec2::ZERO;
         }
         move_image_evw.write(MoveImageEvent);
@@ -1815,6 +1814,7 @@ fn save_cropped(
             let mut reader = image::ImageReader::with_format(buf_in, format);
 
             // Remove the memory limit on image size we can read
+            // This is required to process large images that would otherwise be rejected by the image crate
             reader.no_limits();
 
             let Some(image) = reader.decode().ok() else {
@@ -2032,16 +2032,18 @@ fn file_drop(
         }
     }
     if some_file_dropped {
-        let mut count: usize = sprite_query.iter().count();
-        for (index, filename) in images_filename.into_iter().enumerate() {
-            if !add_mode.0 {
-                is_new_batch.0 = true;
-                count = 0;
-            }
+        let mut count: usize = if add_mode.0 {
+            sprite_query.iter().count()
+        } else {
+            is_new_batch.0 = true;
+            0
+        };
+        for filename in images_filename {
             load_image_evw.write(LoadNewImageEvent {
                 path: filename,
-                index: count + index,
+                index: count,
             });
+            count += 1;
         }
     }
 }
@@ -2222,10 +2224,8 @@ fn on_refresh_review(
         let mut new_patterns = Vec::new();
         for (i, regex_str) in review_state.editable_patterns.iter().enumerate() {
             let old = review_state.cell_patterns.get(i);
-            let label = old.map(|cp| cp.label.clone()).unwrap_or_default();
             let tail = old.map(|cp| cp.tail.clone()).unwrap_or_default();
             new_patterns.push(review::CellPattern {
-                label,
                 tail,
                 regex_str: regex_str.clone(),
             });

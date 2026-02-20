@@ -3,10 +3,9 @@ use std::path::Path;
 
 use regex::Regex;
 
-// A cell's pattern: the differentiating label, full tail after radix, and regex.
+// A cell's pattern: the full tail after radix, and regex.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellPattern {
-    pub label: String,
     pub tail: String,
     pub regex_str: String,
 }
@@ -37,27 +36,8 @@ fn longest_common_prefix(strings: &[&str]) -> String {
     strings[0][..len].to_string()
 }
 
-// Derive a human-readable label from a tail string.
-// Strips leading separators and the file extension.
-fn derive_label(tail: &str) -> String {
-    let sep_chars: &[char] = &['_', '-', '.'];
-    let stripped = tail.trim_start_matches(sep_chars);
-    match stripped.rfind('.') {
-        Some(pos) => {
-            let without_ext = &stripped[..pos];
-            if without_ext.is_empty() {
-                // tail is like ".jpg" → use extension as label
-                stripped[pos + 1..].to_string()
-            } else {
-                without_ext.to_string()
-            }
-        }
-        None => stripped.to_string(),
-    }
-}
-
 // Core algorithm: find common prefix across filenames, determine radix boundary,
-// then derive per-cell tails, labels, and regexes.
+// then derive per-cell tails and regexes.
 // Each cell stores its full tail (separator + label + extension) so mixed extensions work.
 // Returns None if < 2 files or no common structure.
 pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
@@ -72,23 +52,18 @@ pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
 
     let sep_chars: &[char] = &['_', '-', '.'];
 
-    let radix = if raw_prefix.ends_with(sep_chars) {
-        // Prefix includes trailing separator(s) → trim them to get the radix
-        raw_prefix.trim_end_matches(sep_chars)
-    } else {
-        // Check chars immediately after the prefix in each filename
-        let all_non_sep = filenames
-            .iter()
-            .all(|f| f[raw_prefix.len()..].starts_with(|c: char| !sep_chars.contains(&c)));
+    // Check chars immediately after the prefix in each filename
+    let all_non_sep = filenames
+        .iter()
+        .all(|f| f[raw_prefix.len()..].starts_with(|c: char| !sep_chars.contains(&c)));
 
-        if all_non_sep {
-            // We're mid-word (e.g. prefix="frame001_v" from v1/v2), walk back to last separator
-            let pos = raw_prefix.rfind(sep_chars)?;
-            &raw_prefix[..pos]
-        } else {
-            // At least one file has a separator/delimiter right after prefix → prefix IS the radix
-            &raw_prefix
-        }
+    let radix = if all_non_sep {
+        // We're mid-word (e.g. prefix="frame001_v" from v1/v2), walk back to last separator
+        let pos = raw_prefix.rfind(sep_chars)?;
+        &raw_prefix[..pos]
+    } else {
+        // At least one file has a separator right after prefix → prefix IS the radix
+        &raw_prefix
     };
 
     if radix.is_empty() {
@@ -98,10 +73,8 @@ pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
     let mut cell_patterns = Vec::new();
     for &f in filenames {
         let tail = &f[radix.len()..];
-        let label = derive_label(tail);
         let regex_str = format!("^(.*){}$", regex::escape(tail));
         cell_patterns.push(CellPattern {
-            label,
             tail: tail.to_string(),
             regex_str,
         });
@@ -228,9 +201,7 @@ mod tests {
         let result = extract_patterns(&["shot_001_diffuse.jpg", "shot_001_specular.jpg"]).unwrap();
         assert_eq!(result.radix, "shot_001");
         assert_eq!(result.cell_patterns.len(), 2);
-        assert_eq!(result.cell_patterns[0].label, "diffuse");
         assert_eq!(result.cell_patterns[0].tail, "_diffuse.jpg");
-        assert_eq!(result.cell_patterns[1].label, "specular");
         assert_eq!(result.cell_patterns[1].tail, "_specular.jpg");
     }
 
@@ -239,11 +210,8 @@ mod tests {
         let result = extract_patterns(&["shot_001.jpg", "shot_001_diffuse.tiff", "shot_001_specular.jpeg"]).unwrap();
         assert_eq!(result.radix, "shot_001");
         assert_eq!(result.cell_patterns.len(), 3);
-        assert_eq!(result.cell_patterns[0].label, "jpg");
         assert_eq!(result.cell_patterns[0].tail, ".jpg");
-        assert_eq!(result.cell_patterns[1].label, "diffuse");
         assert_eq!(result.cell_patterns[1].tail, "_diffuse.tiff");
-        assert_eq!(result.cell_patterns[2].label, "specular");
         assert_eq!(result.cell_patterns[2].tail, "_specular.jpeg");
     }
 
@@ -251,16 +219,12 @@ mod tests {
     fn version_suffix() {
         let result = extract_patterns(&["frame001_v1.jpg", "frame001_v2.jpg"]).unwrap();
         assert_eq!(result.radix, "frame001");
-        assert_eq!(result.cell_patterns[0].label, "v1");
-        assert_eq!(result.cell_patterns[1].label, "v2");
     }
 
     #[test]
     fn dash_separator() {
         let result = extract_patterns(&["img-001-left.png", "img-001-right.png"]).unwrap();
         assert_eq!(result.radix, "img-001");
-        assert_eq!(result.cell_patterns[0].label, "left");
-        assert_eq!(result.cell_patterns[1].label, "right");
     }
 
     #[test]
@@ -269,14 +233,19 @@ mod tests {
             extract_patterns(&["render_042_beauty.exr", "render_042_depth.exr", "render_042_normal.exr"]).unwrap();
         assert_eq!(result.radix, "render_042");
         assert_eq!(result.cell_patterns.len(), 3);
-        assert_eq!(result.cell_patterns[0].label, "beauty");
-        assert_eq!(result.cell_patterns[1].label, "depth");
-        assert_eq!(result.cell_patterns[2].label, "normal");
     }
 
     #[test]
     fn single_file_returns_none() {
         assert!(extract_patterns(&["shot_001_diffuse.jpg"]).is_none());
+    }
+
+    #[test]
+    fn no_separator_between_radix_and_variant() {
+        let result = extract_patterns(&["frame001.jpg", "frame001v2.jpg"]).unwrap();
+        assert_eq!(result.radix, "frame001");
+        assert_eq!(result.cell_patterns[0].tail, ".jpg");
+        assert_eq!(result.cell_patterns[1].tail, "v2.jpg");
     }
 
     #[test]
