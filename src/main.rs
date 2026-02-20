@@ -551,6 +551,7 @@ fn ui_bottom_menu(
     mut reset_vix_evw: MessageWriter<ResetVisibilityEvent>,
     mut ui_state: ResMut<UiState>,
     mut global_scale: ResMut<GlobalScale>,
+    mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut save_cropped_evw: MessageWriter<SaveCropped>,
     mut reset_scales_evw: MessageWriter<ResetScales>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
@@ -617,6 +618,7 @@ fn ui_bottom_menu(
                         .changed();
                     if elem1 || elem2 || elem3 || elem4 {
                         reset_vix_evw.write(ResetVisibilityEvent);
+                        move_image_evw.write(MoveImageEvent);
                     }
 
                     ui.separator();
