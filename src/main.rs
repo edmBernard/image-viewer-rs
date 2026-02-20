@@ -917,6 +917,7 @@ fn on_remove_image(
     mut image_order: ResMut<ImageOrder>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
+    mut review_state: ResMut<ReviewState>,
 ) {
     for ev in remove_evr.read() {
         let target_id = ev.0;
@@ -927,6 +928,14 @@ fn on_remove_image(
                 commands.entity(entity).despawn();
                 continue;
             }
+        }
+
+        // Remove the corresponding review pattern
+        if review_state.enabled && target_id < review_state.cell_patterns.len() {
+            review_state.cell_patterns.remove(target_id);
+        }
+        if review_state.enabled && target_id < review_state.editable_patterns.len() {
+            review_state.editable_patterns.remove(target_id);
         }
 
         // Remove from ImageOrder, keeping remaining in display order
@@ -973,6 +982,7 @@ fn on_reorder_images(
     mut query_by_id: Query<&mut Id>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut reset_vis_evw: MessageWriter<ResetVisibilityEvent>,
+    mut review_state: ResMut<ReviewState>,
 ) {
     if reorder_evr.is_empty() {
         return;
@@ -1004,6 +1014,20 @@ fn on_reorder_images(
             if id.0 == temp_id {
                 id.0 = new_idx;
                 continue;
+            }
+        }
+    }
+
+    // Reorder review patterns to follow the new image order
+    if review_state.enabled && !review_state.cell_patterns.is_empty() {
+        let old_patterns = review_state.cell_patterns.clone();
+        let old_editable = review_state.editable_patterns.clone();
+        for (new_idx, &old_id) in order_snapshot.iter().enumerate() {
+            if old_id < old_patterns.len() {
+                review_state.cell_patterns[new_idx] = old_patterns[old_id].clone();
+            }
+            if old_id < old_editable.len() {
+                review_state.editable_patterns[new_idx] = old_editable[old_id].clone();
             }
         }
     }
@@ -2175,11 +2199,14 @@ fn on_navigate_review(
 fn on_activate_review(
     mut activate_evr: MessageReader<ActivateReviewEvent>,
     mut review_state: ResMut<ReviewState>,
-    image_query: Query<&ImagePath, With<MyImage>>,
+    image_query: Query<(&Id, &ImagePath), With<MyImage>>,
 ) {
     for _ev in activate_evr.read() {
         review_state.error = None;
-        let paths: Vec<String> = image_query.iter().map(|p| p.0.clone()).collect();
+        // Collect paths sorted by Id so pattern order matches display order
+        let mut id_paths: Vec<(usize, String)> = image_query.iter().map(|(id, p)| (id.0, p.0.clone())).collect();
+        id_paths.sort_by_key(|(id, _)| *id);
+        let paths: Vec<String> = id_paths.into_iter().map(|(_, p)| p).collect();
         if paths.len() < 2 {
             review_state.error = Some("Review mode needs at least 2 images".to_string());
             continue;
@@ -2288,12 +2315,12 @@ fn ui_review_panel(
                     ui.separator();
                 }
 
-                if ui.button("\u{21BB}").on_hover_text("Reload directory with current regexes").clicked() {
+                if ui.button("\u{1F4E4}").on_hover_text("Reload directory with current regexes").clicked() {
                     refresh_evw.write(RefreshReviewEvent);
                 }
             }
 
-            if ui.button("\u{2672}").on_hover_text("Recompute patterns from open images").clicked() {
+            if ui.button("\u{21BB}").on_hover_text("Recompute patterns from open images").clicked() {
                 activate_evw.write(ActivateReviewEvent);
             }
         });
