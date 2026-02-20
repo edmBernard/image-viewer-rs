@@ -27,6 +27,9 @@ tempfile = "3"
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSURL", "NSArray"] }
 
+[build-dependencies]
+winresource = "0.1.30"
+
 [package.metadata.bundle]
 identifier = "io.github.edmbernard.image-viewer-rs"
 resources = ["assets/"]  # Shipped assets are not currently used. But it allow to bundle license copy.
