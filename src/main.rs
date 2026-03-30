@@ -1192,6 +1192,9 @@ fn on_move_image(
     move_image_evr.clear();
 
     let window = windows.single().unwrap();
+    if window.width() == 0. || window.height() == 0. {
+        return;
+    }
     let num_images = sprite_position.iter().count();
     for (id, position, scale, rotation, mut transform, mut sprite, mut visibility) in &mut sprite_position {
         let image_handle = sprite.image.clone();
@@ -1303,6 +1306,9 @@ fn on_move_cursor(
 ) {
     let num_images = cursor_query.iter().count();
     let window = windows.single().unwrap();
+    if window.width() == 0. || window.height() == 0. {
+        return;
+    }
 
     let Some(cursor_position) = window.cursor_position() else {
         return;
@@ -1757,6 +1763,9 @@ fn fit_to_screen(
 ) {
     for _ev in fit_to_screen_evr.read() {
         let window = windows.single().unwrap();
+        if window.width() == 0. || window.height() == 0. {
+            continue;
+        }
         let num_images = sprite_query.iter().count();
 
         let mut first = true;
