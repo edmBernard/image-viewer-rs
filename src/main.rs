@@ -2227,14 +2227,9 @@ fn on_activate_review(
             continue;
         };
 
-        // Get just the filenames for pattern extraction
-        let filenames: Vec<String> = paths
-            .iter()
-            .filter_map(|p| Path::new(p).file_name().and_then(|f| f.to_str()).map(String::from))
-            .collect();
-        let filename_refs: Vec<&str> = filenames.iter().map(|s| s.as_str()).collect();
+        let path_refs: Vec<&Path> = paths.iter().map(Path::new).collect();
 
-        let Some(result) = review::extract_patterns(&filename_refs) else {
+        let Some(result) = review::extract_patterns_from_paths(&path_refs) else {
             review_state.error = Some("No common pattern found in filenames".to_string());
             continue;
         };
@@ -2262,8 +2257,10 @@ fn on_refresh_review(
         let mut new_patterns = Vec::new();
         for (i, regex_str) in review_state.editable_patterns.iter().enumerate() {
             let old = review_state.cell_patterns.get(i);
+            let directory = old.map(|cp| cp.directory.clone()).unwrap_or_default();
             let tail = old.map(|cp| cp.tail.clone()).unwrap_or_default();
             new_patterns.push(review::CellPattern {
+                directory,
                 tail,
                 regex_str: regex_str.clone(),
             });

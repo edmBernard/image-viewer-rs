@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::Path;
 
 use regex::Regex;
 
-// A cell's pattern: the full tail after radix, and regex.
+// A cell's pattern: where to search, the full tail after radix, and regex.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellPattern {
+    pub directory: String,
     pub tail: String,
     pub regex_str: String,
 }
@@ -15,6 +17,11 @@ pub struct CellPattern {
 pub struct ExtractionResult {
     pub radix: String,
     pub cell_patterns: Vec<CellPattern>,
+}
+
+struct InputPattern<'a> {
+    directory: String,
+    filename: &'a str,
 }
 
 fn longest_common_prefix(strings: &[&str]) -> String {
@@ -40,12 +47,39 @@ fn longest_common_prefix(strings: &[&str]) -> String {
 // then derive per-cell tails and regexes.
 // Each cell stores its full tail (separator + label + extension) so mixed extensions work.
 // Returns None if < 2 files or no common structure.
-pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
-    if filenames.len() < 2 {
+#[cfg(test)]
+fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
+    let inputs: Vec<InputPattern> = filenames
+        .iter()
+        .map(|filename| InputPattern {
+            directory: String::new(),
+            filename: *filename,
+        })
+        .collect();
+    extract_patterns_from_inputs(&inputs)
+}
+
+pub fn extract_patterns_from_paths(paths: &[&Path]) -> Option<ExtractionResult> {
+    let mut inputs = Vec::new();
+    for path in paths {
+        let filename = path.file_name().and_then(|filename| filename.to_str())?;
+        let directory = path
+            .parent()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_default();
+        inputs.push(InputPattern { directory, filename });
+    }
+    extract_patterns_from_inputs(&inputs)
+}
+
+fn extract_patterns_from_inputs(inputs: &[InputPattern]) -> Option<ExtractionResult> {
+    if inputs.len() < 2 {
         return None;
     }
 
-    let raw_prefix = longest_common_prefix(filenames);
+    let filenames: Vec<&str> = inputs.iter().map(|input| input.filename).collect();
+
+    let raw_prefix = longest_common_prefix(&filenames);
     if raw_prefix.is_empty() {
         return None;
     }
@@ -71,18 +105,23 @@ pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
     }
 
     let mut cell_patterns = Vec::new();
-    for &f in filenames {
+    for input in inputs {
+        let f = input.filename;
         let tail = &f[radix.len()..];
         let regex_str = format!("^(.*){}$", regex::escape(tail));
         cell_patterns.push(CellPattern {
+            directory: input.directory.clone(),
             tail: tail.to_string(),
             regex_str,
         });
     }
 
-    // Verify all tails are distinct
-    let unique_tails: BTreeSet<&str> = cell_patterns.iter().map(|c| c.tail.as_str()).collect();
-    if unique_tails.len() != cell_patterns.len() {
+    // Verify cells are distinct. Identical tails are allowed when the source directories differ.
+    let unique_cells: BTreeSet<(&str, &str)> = cell_patterns
+        .iter()
+        .map(|c| (c.directory.as_str(), c.tail.as_str()))
+        .collect();
+    if unique_cells.len() != cell_patterns.len() {
         return None;
     }
 
@@ -92,12 +131,18 @@ pub fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
     })
 }
 
+fn pattern_directory<'a>(default_directory: &'a Path, cell_pattern: &'a CellPattern) -> &'a Path {
+    if cell_pattern.directory.is_empty() {
+        default_directory
+    } else {
+        Path::new(&cell_pattern.directory)
+    }
+}
+
 // Flat read_dir, match each filename against all cell regexes, collect unique radixes (sorted).
 // Only keeps radixes that match at least 2 different cell patterns to filter out false positives
 // from broad regexes (e.g. "^(.*)\.jpg$" matching every .jpg file).
 pub fn scan_radixes(directory: &Path, cell_patterns: &[CellPattern]) -> Vec<String> {
-    use std::collections::HashMap;
-
     // Compile all regexes upfront, skipping invalid ones
     let compiled: Vec<Option<Regex>> = cell_patterns
         .iter()
@@ -110,23 +155,33 @@ pub fn scan_radixes(directory: &Path, cell_patterns: &[CellPattern]) -> Vec<Stri
         })
         .collect();
 
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-
     // Track which cell indices each radix matches
     let mut radix_cells: HashMap<String, BTreeSet<usize>> = HashMap::new();
+    let mut patterns_by_directory: HashMap<String, Vec<usize>> = HashMap::new();
 
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        let Some(name) = entry.file_name().to_str().map(String::from) else {
+    for (cell_idx, cell_pattern) in cell_patterns.iter().enumerate() {
+        if compiled[cell_idx].is_none() {
+            continue;
+        }
+        let directory = pattern_directory(directory, cell_pattern).to_string_lossy().to_string();
+        patterns_by_directory.entry(directory).or_default().push(cell_idx);
+    }
+
+    for (directory, cell_indices) in patterns_by_directory {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };
-        for (cell_idx, re) in compiled.iter().enumerate() {
-            let Some(re) = re else { continue };
-            if let Some(caps) = re.captures(&name) {
-                if let Some(m) = caps.get(1) {
-                    radix_cells.entry(m.as_str().to_string()).or_default().insert(cell_idx);
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
+                continue;
+            };
+            for &cell_idx in &cell_indices {
+                let Some(re) = &compiled[cell_idx] else { continue };
+                if let Some(caps) = re.captures(&name) {
+                    if let Some(m) = caps.get(1) {
+                        radix_cells.entry(m.as_str().to_string()).or_default().insert(cell_idx);
+                    }
                 }
             }
         }
@@ -147,31 +202,38 @@ pub fn scan_radixes(directory: &Path, cell_patterns: &[CellPattern]) -> Vec<Stri
 // directory entries. This works even when the user has manually edited the regex patterns.
 // Returns None for cells where no matching file is found.
 pub fn resolve_files_for_radix(directory: &Path, radix: &str, cell_patterns: &[CellPattern]) -> Vec<Option<String>> {
-    let compiled: Vec<Option<Regex>> = cell_patterns
-        .iter()
-        .map(|cp| Regex::new(&cp.regex_str).ok())
-        .collect();
-
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return vec![None; cell_patterns.len()];
-    };
+    let compiled: Vec<Option<Regex>> = cell_patterns.iter().map(|cp| Regex::new(&cp.regex_str).ok()).collect();
 
     let mut result: Vec<Option<String>> = vec![None; cell_patterns.len()];
+    let mut patterns_by_directory: HashMap<String, Vec<usize>> = HashMap::new();
 
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        let Some(name) = entry.file_name().to_str().map(String::from) else {
+    for (cell_idx, cell_pattern) in cell_patterns.iter().enumerate() {
+        if compiled[cell_idx].is_none() {
+            continue;
+        }
+        let directory = pattern_directory(directory, cell_pattern).to_string_lossy().to_string();
+        patterns_by_directory.entry(directory).or_default().push(cell_idx);
+    }
+
+    for (directory, cell_indices) in patterns_by_directory {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };
-        for (i, re) in compiled.iter().enumerate() {
-            if result[i].is_some() {
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
                 continue;
-            }
-            let Some(re) = re else { continue };
-            if let Some(caps) = re.captures(&name) {
-                if let Some(m) = caps.get(1) {
-                    if m.as_str() == radix {
-                        result[i] = Some(directory.join(&name).to_string_lossy().to_string());
+            };
+            for &i in &cell_indices {
+                if result[i].is_some() {
+                    continue;
+                }
+                let Some(re) = &compiled[i] else { continue };
+                if let Some(caps) = re.captures(&name) {
+                    if let Some(m) = caps.get(1) {
+                        if m.as_str() == radix {
+                            result[i] = Some(Path::new(&directory).join(&name).to_string_lossy().to_string());
+                        }
                     }
                 }
             }
@@ -332,6 +394,32 @@ mod tests {
         assert_eq!(radixes, vec!["shot_003"]);
     }
 
+    #[test]
+    fn scan_uses_cell_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let left_dir = dir.path().join("left");
+        let right_dir = dir.path().join("right");
+        fs::create_dir(&left_dir).unwrap();
+        fs::create_dir(&right_dir).unwrap();
+
+        fs::write(left_dir.join("shot_001.jpg"), b"").unwrap();
+        fs::write(right_dir.join("shot_001.jpg"), b"").unwrap();
+        fs::write(left_dir.join("shot_002.jpg"), b"").unwrap();
+        fs::write(right_dir.join("shot_002.jpg"), b"").unwrap();
+        fs::write(left_dir.join("left_only.jpg"), b"").unwrap();
+
+        let initial_paths = [left_dir.join("shot_001.jpg"), right_dir.join("shot_001.jpg")];
+        let path_refs: Vec<&Path> = initial_paths.iter().map(|path| path.as_path()).collect();
+        let result = extract_patterns_from_paths(&path_refs).unwrap();
+
+        assert_eq!(result.radix, "shot_001.jpg");
+        assert_eq!(result.cell_patterns[0].directory, left_dir.to_string_lossy());
+        assert_eq!(result.cell_patterns[1].directory, right_dir.to_string_lossy());
+
+        let radixes = scan_radixes(dir.path(), &result.cell_patterns);
+        assert_eq!(radixes, vec!["shot_001.jpg", "shot_002.jpg"]);
+    }
+
     // -- File resolution --
 
     #[test]
@@ -369,5 +457,33 @@ mod tests {
         let files = resolve_files_for_radix(dir.path(), "shot_001", &result.cell_patterns);
         assert!(files[0].is_some());
         assert!(files[1].is_none());
+    }
+
+    #[test]
+    fn resolve_uses_cell_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let left_dir = dir.path().join("left");
+        let right_dir = dir.path().join("right");
+        fs::create_dir(&left_dir).unwrap();
+        fs::create_dir(&right_dir).unwrap();
+
+        fs::write(left_dir.join("shot_001.jpg"), b"").unwrap();
+        fs::write(right_dir.join("shot_001.jpg"), b"").unwrap();
+        fs::write(left_dir.join("shot_002.jpg"), b"").unwrap();
+        fs::write(right_dir.join("shot_002.jpg"), b"").unwrap();
+
+        let initial_paths = [left_dir.join("shot_001.jpg"), right_dir.join("shot_001.jpg")];
+        let path_refs: Vec<&Path> = initial_paths.iter().map(|path| path.as_path()).collect();
+        let result = extract_patterns_from_paths(&path_refs).unwrap();
+
+        let files = resolve_files_for_radix(dir.path(), "shot_002.jpg", &result.cell_patterns);
+        assert_eq!(
+            files[0],
+            Some(left_dir.join("shot_002.jpg").to_string_lossy().to_string())
+        );
+        assert_eq!(
+            files[1],
+            Some(right_dir.join("shot_002.jpg").to_string_lossy().to_string())
+        );
     }
 }
