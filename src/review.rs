@@ -243,6 +243,23 @@ pub fn resolve_files_for_radix(directory: &Path, radix: &str, cell_patterns: &[C
     result
 }
 
+// Given a single filename, find the radix (set identifier) it belongs to by matching it
+// against the cell patterns. Returns the first radix captured by any matching cell regex.
+// Used by drag-to-switch mode to jump to the set a dropped image belongs to.
+pub fn match_radix(filename: &str, cell_patterns: &[CellPattern]) -> Option<String> {
+    for cell_pattern in cell_patterns {
+        let Ok(re) = Regex::new(&cell_pattern.regex_str) else {
+            continue;
+        };
+        if let Some(caps) = re.captures(filename) {
+            if let Some(m) = caps.get(1) {
+                return Some(m.as_str().to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 fn extract_radix_from_filename(regex_str: &str, filename: &str) -> Option<String> {
     let re = Regex::new(regex_str).ok()?;
@@ -336,6 +353,24 @@ mod tests {
         let result = extract_patterns(&["shot_001_diffuse.jpg", "shot_001_specular.jpg"]).unwrap();
         let radix = extract_radix_from_filename(&result.cell_patterns[0].regex_str, "photo_holiday.png");
         assert!(radix.is_none());
+    }
+
+    // -- Drag-to-switch radix matching --
+
+    #[test]
+    fn match_radix_finds_set_from_any_cell() {
+        let result = extract_patterns(&["shot_001_diffuse.jpg", "shot_001_specular.jpg"]).unwrap();
+        // A dropped file matching the second cell still resolves to the right radix.
+        assert_eq!(
+            match_radix("shot_042_specular.jpg", &result.cell_patterns),
+            Some("shot_042".to_string())
+        );
+    }
+
+    #[test]
+    fn match_radix_rejects_unrelated_file() {
+        let result = extract_patterns(&["shot_001_diffuse.jpg", "shot_001_specular.jpg"]).unwrap();
+        assert!(match_radix("photo_holiday.png", &result.cell_patterns).is_none());
     }
 
     // -- Directory scanning (temp dir with test files) --

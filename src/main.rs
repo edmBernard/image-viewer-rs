@@ -215,6 +215,7 @@ fn main() -> Result<()> {
         })
         .insert_resource(ImageOrder(Vec::new()))
         .insert_resource(ReviewState::default())
+        .insert_resource(PreservedView::default())
         .add_systems(Startup, setup)
         .add_message::<LoadNewImageEvent>()
         .add_message::<NewImageLoadedEvent>()
@@ -232,6 +233,7 @@ fn main() -> Result<()> {
         .add_message::<NavigateReviewEvent>()
         .add_message::<RefreshReviewEvent>()
         .add_message::<ActivateReviewEvent>()
+        .add_message::<SwitchReviewToFileEvent>()
         // Egui systems must run in EguiPrimaryContextPass (not Update)
         .add_systems(EguiPrimaryContextPass, configure_visuals.run_if(run_once))
         .add_systems(
@@ -304,6 +306,7 @@ fn main() -> Result<()> {
                 on_navigate_review,
                 on_activate_review,
                 on_refresh_review,
+                on_switch_review_to_file,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -380,6 +383,18 @@ struct ReviewState {
     current_index: usize,
     editable_patterns: Vec<String>,
     error: Option<String>,
+    // When enabled, dropping an image switches to the set that image belongs to
+    // instead of replacing the current batch.
+    drag_switch: bool,
+}
+
+// Snapshot of the current zoom/pan, captured when switching review sets so the next
+// batch reuses it instead of auto-fitting. Keyed by image Id (cell index).
+#[derive(Resource, Default)]
+struct PreservedView {
+    pending: bool,
+    global_scale: f32,
+    cells: std::collections::HashMap<usize, (f32, Vec2)>,
 }
 
 // MARK: Components
@@ -466,6 +481,10 @@ struct RefreshReviewEvent;
 
 #[derive(Message)]
 struct ActivateReviewEvent;
+
+// Drag-to-switch: jump to the review set that the dropped file belongs to.
+#[derive(Message)]
+struct SwitchReviewToFileEvent(String);
 
 // MARK: Setup
 fn setup(
@@ -1760,12 +1779,28 @@ fn fit_to_screen(
     layout_state: Res<GridLayoutState>,
     config: Res<Config>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
+    mut preserved: ResMut<PreservedView>,
 ) {
     for _ev in fit_to_screen_evr.read() {
         let window = windows.single().unwrap();
         if window.width() == 0. || window.height() == 0. {
             continue;
         }
+
+        // When switching review sets we reuse the previous zoom/pan instead of refitting.
+        if preserved.pending {
+            global_scale.0 = preserved.global_scale;
+            for (id, _sprite, mut scale, mut position) in &mut sprite_query {
+                if let Some(&(cell_scale, cell_position)) = preserved.cells.get(&id.0) {
+                    scale.0 = cell_scale;
+                    position.0 = cell_position;
+                }
+            }
+            preserved.pending = false;
+            move_image_evw.write(MoveImageEvent);
+            continue;
+        }
+
         let num_images = sprite_query.iter().count();
 
         let mut first = true;
@@ -2048,6 +2083,8 @@ fn file_drop(
     mut is_new_batch: ResMut<NewImageBatch>,
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
     add_mode: Res<AddMode>,
+    review_state: Res<ReviewState>,
+    mut switch_review_evw: MessageWriter<SwitchReviewToFileEvent>,
     sprite_query: Query<&Id, With<MyImage>>,
 ) {
     if dnd_evr.is_empty() {
@@ -2066,6 +2103,16 @@ fn file_drop(
             images_filename.push(String::from(image_absolute));
         }
     }
+
+    // In review drag-to-switch mode, a dropped image jumps to the set it belongs to
+    // rather than replacing the current batch. Only the first dropped file is used.
+    if review_state.enabled && review_state.drag_switch {
+        if let Some(first) = images_filename.into_iter().next() {
+            switch_review_evw.write(SwitchReviewToFileEvent(first));
+        }
+        return;
+    }
+
     if some_file_dropped {
         let mut count: usize = if add_mode.0 {
             sprite_query.iter().count()
@@ -2179,16 +2226,35 @@ fn poll_dock_drop_queue(
 
 // MARK: Review Mode
 
+// Snapshot the current zoom/pan of the open images so the next review set reuses it
+// instead of auto-fitting. Cleared/overwritten on every set switch.
+fn capture_view(
+    preserved: &mut PreservedView,
+    global_scale: f32,
+    sprite_query: &Query<(&Id, &Scale, &Position), With<MyImage>>,
+) {
+    preserved.global_scale = global_scale;
+    preserved.cells.clear();
+    for (id, scale, position) in sprite_query {
+        preserved.cells.insert(id.0, (scale.0, position.0));
+    }
+    preserved.pending = !preserved.cells.is_empty();
+}
+
 fn on_navigate_review(
     mut navigate_evr: MessageReader<NavigateReviewEvent>,
     mut review_state: ResMut<ReviewState>,
     mut is_new_batch: ResMut<NewImageBatch>,
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut preserved: ResMut<PreservedView>,
+    global_scale: Res<GlobalScale>,
+    sprite_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
 ) {
     for ev in navigate_evr.read() {
         if review_state.radixes.is_empty() {
             continue;
         }
+        capture_view(&mut preserved, global_scale.0, &sprite_query);
         let count = review_state.radixes.len() as i32;
         let new_index = (review_state.current_index as i32 + ev.0).rem_euclid(count) as usize;
         review_state.current_index = new_index;
@@ -2197,6 +2263,46 @@ fn on_navigate_review(
         let directory = PathBuf::from(&review_state.directory);
         let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
 
+        is_new_batch.0 = true;
+        for (index, file) in files.into_iter().enumerate() {
+            let Some(path) = file else { continue };
+            load_image_evw.write(LoadNewImageEvent { path, index });
+        }
+    }
+}
+
+fn on_switch_review_to_file(
+    mut switch_evr: MessageReader<SwitchReviewToFileEvent>,
+    mut review_state: ResMut<ReviewState>,
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut preserved: ResMut<PreservedView>,
+    global_scale: Res<GlobalScale>,
+    sprite_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
+) {
+    for ev in switch_evr.read() {
+        let Some(filename) = Path::new(&ev.0).file_name().and_then(|name| name.to_str()) else {
+            review_state.error = Some("Cannot read the dropped file name".to_string());
+            continue;
+        };
+
+        let Some(radix) = review::match_radix(filename, &review_state.cell_patterns) else {
+            review_state.error = Some("Dropped image doesn't match the review pattern".to_string());
+            continue;
+        };
+
+        capture_view(&mut preserved, global_scale.0, &sprite_query);
+
+        // Locate the set in the scanned list so the counter stays in sync. If it isn't there
+        // (e.g. dropped from outside the reviewed directory) we still load it, leaving the index.
+        if let Some(index) = review_state.radixes.iter().position(|r| r == &radix) {
+            review_state.current_index = index;
+        }
+
+        let directory = PathBuf::from(&review_state.directory);
+        let files = review::resolve_files_for_radix(&directory, &radix, &review_state.cell_patterns);
+
+        review_state.error = None;
         is_new_batch.0 = true;
         for (index, file) in files.into_iter().enumerate() {
             let Some(path) = file else { continue };
@@ -2308,6 +2414,9 @@ fn ui_review_panel(
                 if ui.button("\u{25B6}").clicked() {
                     navigate_evw.write(NavigateReviewEvent(1));
                 }
+
+                ui.toggle_value(&mut review_state.drag_switch, "\u{1F4E5}")
+                    .on_hover_text("Drag-to-switch: drop an image to jump to its set");
 
                 let total = review_state.radixes.len();
                 let current = review_state.current_index;
