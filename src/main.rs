@@ -374,7 +374,7 @@ struct RecordedPressedKey(Option<KeyCode>);
 #[derive(Resource)]
 struct ImageOrder(Vec<usize>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct ReviewState {
     enabled: bool,
     directory: String,
@@ -384,8 +384,23 @@ struct ReviewState {
     editable_patterns: Vec<String>,
     error: Option<String>,
     // When enabled, dropping an image switches to the set that image belongs to
-    // instead of replacing the current batch.
+    // instead of replacing the current batch. On by default.
     drag_switch: bool,
+}
+
+impl Default for ReviewState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: String::new(),
+            cell_patterns: Vec::new(),
+            radixes: Vec::new(),
+            current_index: 0,
+            editable_patterns: Vec::new(),
+            error: None,
+            drag_switch: true,
+        }
+    }
 }
 
 // Snapshot of the current zoom/pan, captured when switching review sets so the next
