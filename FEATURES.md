@@ -56,12 +56,18 @@ Review mode is designed for navigating through sets of related images that follo
 1. Open 2 or more images with a common naming pattern. For example: `shot_001_diffuse.jpg` and `shot_001_specular.jpg`.
 2. Click the **Review** toggle in the bottom bar.
 3. The app analyzes the filenames, finds the common radix (`shot_001`), and determines the varying parts (`_diffuse.jpg`, `_specular.jpg`).
-4. It scans the directory for all other radixes that match these patterns (e.g., `shot_002`, `shot_003`, ...).
+4. It scans the directories for all other radixes that match these patterns (e.g., `shot_002`, `shot_003`, ...).
 5. Use `◀` / `▶` buttons to navigate through the matching sets.
-6. The regex patterns for each cell are displayed and editable. Modify them and click `↻` to reload the directory with updated patterns.
-7. Click `♲` to re-analyze patterns from the currently loaded images (useful after manually loading different files).
+6. The regex patterns for each cell are displayed and editable. Modify them and click `📤` to reload the directory with updated patterns.
+7. Click `↻` to re-analyze patterns from the currently loaded images (useful after manually loading different files).
 
-Review mode requires files to share a directory and follow a consistent naming structure.
+**Drag-to-switch:** The `⤓` toggle (enabled by default) lets you jump straight to a set by dragging one of its images into the window. The app reads the dropped file's name, works out which set it belongs to, and switches to that set instead of replacing the current batch. Toggle it off to return to the normal drop-to-replace behavior.
+
+**Zoom is preserved:** When you switch sets — with the `◀` / `▶` buttons or by drag-to-switch — the current zoom and pan are carried over to the new set instead of resetting to fit-to-screen. This keeps you locked onto the same region as you flip through related images for comparison.
+
+**Multiple directories:** The images you start from don't have to live in the same folder. Each cell remembers its own source directory, so you can review sets where the variants are split across directories (e.g. `left/shot_001.jpg` and `right/shot_001.jpg`), and navigation resolves each cell from its respective directory.
+
+Review mode requires files to follow a consistent naming structure.
 
 ## Settings Panel
 
