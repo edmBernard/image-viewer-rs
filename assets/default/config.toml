@@ -30,3 +30,8 @@ scroll_behavior = "None"
 grid_width = 0
 # Texture interpolation mode (Nearest or Bilinear)
 sampler_mode = "Nearest"
+
+[color]
+# Color space of the physical screen; images are converted to it at load.
+# One of: Srgb, AdobeRgb, DisplayP3, Rec2020
+screen_color_space = "Srgb"

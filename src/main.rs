@@ -72,6 +72,52 @@ enum SamplerMode {
     Bilinear,
 }
 
+// Color space the physical screen works in. Decoded images are converted from
+// their own color space (embedded ICC profile, or assumed sRGB) to this one,
+// so a wide-gamut monitor can be fed wide-gamut values. The rendered values
+// are sent to the screen as-is on every platform: it is up to the user to
+// select the space matching their monitor.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+enum ScreenColorSpace {
+    #[default]
+    Srgb,
+    AdobeRgb,
+    DisplayP3,
+    Rec2020,
+}
+
+impl ScreenColorSpace {
+    const ALL: [ScreenColorSpace; 4] = [
+        ScreenColorSpace::Srgb,
+        ScreenColorSpace::AdobeRgb,
+        ScreenColorSpace::DisplayP3,
+        ScreenColorSpace::Rec2020,
+    ];
+
+    fn profile(&self) -> ColorProfile {
+        match self {
+            ScreenColorSpace::Srgb => ColorProfile::new_srgb(),
+            ScreenColorSpace::AdobeRgb => ColorProfile::new_adobe_rgb(),
+            ScreenColorSpace::DisplayP3 => ColorProfile::new_display_p3(),
+            ScreenColorSpace::Rec2020 => ColorProfile::new_bt2020(),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ScreenColorSpace::Srgb => "sRGB",
+            ScreenColorSpace::AdobeRgb => "Adobe RGB",
+            ScreenColorSpace::DisplayP3 => "Display P3",
+            ScreenColorSpace::Rec2020 => "Rec. 2020",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct ConfigColor {
+    screen_color_space: ScreenColorSpace,
+}
+
 // MARK: Config Struct
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigShortcut {
@@ -120,6 +166,9 @@ struct Config {
     shortcut: ConfigShortcut,
     hdr: ConfigHDR,
     misc: ConfigMisc,
+// default so config files predating this section keep loading
+    #[serde(default)]
+    color: ConfigColor,
 }
 
 // MARK: Main
@@ -232,6 +281,7 @@ fn main() -> Result<()> {
         .add_message::<ChangeSamplerEvent>()
         .add_message::<RemoveImageEvent>()
         .add_message::<ReorderImagesEvent>()
+        .add_message::<ReloadImagesEvent>()
         .add_message::<NavigateReviewEvent>()
         .add_message::<RefreshReviewEvent>()
         .add_message::<ActivateReviewEvent>()
@@ -309,6 +359,7 @@ fn main() -> Result<()> {
                 on_activate_review,
                 on_refresh_review,
                 on_switch_review_to_file,
+                on_reload_images,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -320,17 +371,28 @@ fn main() -> Result<()> {
 }
 
 // MARK: Color Management
-// Images carrying an ICC profile (Display P3, Adobe RGB, ...) are converted to
-// sRGB when decoded, so all images are compared in the same color space and
-// match the sRGB interpretation of the GPU textures.
+// Decoded images are converted from their color space (embedded ICC profile,
+// or sRGB when untagged) to the configured screen color space, so all images
+// are compared in the same space and displayed with the intended colors.
 
-fn convert_to_srgb(mut image: DynamicImage, icc: &[u8], path: &str) -> DynamicImage {
-    let profile = match ColorProfile::new_from_slice(icc) {
+fn convert_to_screen_space(
+    mut image: DynamicImage,
+    icc: Option<&[u8]>,
+    target: ScreenColorSpace,
+    path: &str,
+) -> DynamicImage {
+    let src_profile = match icc {
+        Some(icc) => match ColorProfile::new_from_slice(icc) {
         Ok(profile) => profile,
         Err(e) => {
             println!("{path}: ignoring unreadable ICC profile: {e}");
             return image;
         }
+        },
+        // Untagged images are assumed sRGB: already in place for an sRGB
+        // screen, otherwise they need the conversion like everything else.
+        None if target == ScreenColorSpace::Srgb => return image,
+        None => ColorProfile::new_srgb(),
     };
 
     let is_gray = matches!(
@@ -340,61 +402,66 @@ fn convert_to_srgb(mut image: DynamicImage, icc: &[u8], path: &str) -> DynamicIm
     // The decoded buffers are RGB or grayscale; a profile for another space
     // (e.g. CMYK, the decoder already converted those pixels) can't apply.
     let expected_space = if is_gray { DataColorSpace::Gray } else { DataColorSpace::Rgb };
-    if profile.color_space != expected_space {
+    if src_profile.color_space != expected_space {
         println!(
             "{path}: ICC profile is for {:?} but pixels are {:?}, profile ignored",
-            profile.color_space,
+            src_profile.color_space,
             image.color()
         );
         return image;
     }
 
+    let dst_profile = target.profile();
     let result = match &mut image {
-        DynamicImage::ImageLuma8(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageLumaA8(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageRgb8(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageRgba8(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageLuma16(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageLumaA16(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageRgb16(buf) => icc_image_to_srgb(&profile, buf),
-        DynamicImage::ImageRgba16(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageLuma8(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageLumaA8(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageRgb8(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageRgba8(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageLuma16(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageLumaA16(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageRgb16(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
+        DynamicImage::ImageRgba16(buf) => icc_convert_image(&src_profile, &dst_profile, buf),
         // f32 formats are not loaded by this app
         _ => Ok(()),
     };
     if let Err(e) = result {
-        println!("{path}: ICC conversion to sRGB failed, image kept as-is: {e}");
+        println!("{path}: color space conversion failed, image kept as-is: {e}");
     }
     image
 }
 
 // Sample types moxcms can transform; picks the executor matching the bit depth.
 trait IccSample: image::Primitive + Default {
-    fn create_to_srgb_transform(
-        profile: &ColorProfile,
+    fn create_transform(
+        src: &ColorProfile,
+        dst: &ColorProfile,
         layout: Layout,
     ) -> std::result::Result<Arc<dyn TransformExecutor<Self> + Send + Sync>, CmsError>;
 }
 
 impl IccSample for u8 {
-    fn create_to_srgb_transform(
-        profile: &ColorProfile,
+    fn create_transform(
+        src: &ColorProfile,
+        dst: &ColorProfile,
         layout: Layout,
     ) -> std::result::Result<Arc<dyn TransformExecutor<u8> + Send + Sync>, CmsError> {
-        profile.create_transform_8bit(layout, &ColorProfile::new_srgb(), layout, TransformOptions::default())
+        src.create_transform_8bit(layout, dst, layout, TransformOptions::default())
     }
 }
 
 impl IccSample for u16 {
-    fn create_to_srgb_transform(
-        profile: &ColorProfile,
+    fn create_transform(
+        src: &ColorProfile,
+        dst: &ColorProfile,
         layout: Layout,
     ) -> std::result::Result<Arc<dyn TransformExecutor<u16> + Send + Sync>, CmsError> {
-        profile.create_transform_16bit(layout, &ColorProfile::new_srgb(), layout, TransformOptions::default())
+        src.create_transform_16bit(layout, dst, layout, TransformOptions::default())
     }
 }
 
-fn icc_image_to_srgb<P>(
-    profile: &ColorProfile,
+fn icc_convert_image<P>(
+    src: &ColorProfile,
+    dst: &ColorProfile,
     buf: &mut ImageBuffer<P, Vec<P::Subpixel>>,
 ) -> std::result::Result<(), CmsError>
 where
@@ -408,7 +475,7 @@ where
         _ => Layout::Rgba,
     };
     let row_len = buf.width() as usize * P::CHANNEL_COUNT as usize;
-    let transform = P::Subpixel::create_to_srgb_transform(profile, layout)?;
+    let transform = P::Subpixel::create_transform(src, dst, layout)?;
     transform_rows_in_place(transform.as_ref(), buf, row_len)
 }
 
@@ -652,6 +719,11 @@ struct RemoveImageEvent(usize); // the Id of the image to remove
 #[derive(Message)]
 struct ReorderImagesEvent; // signal to recompute layout after reorder
 
+// Reload every open image from disk, e.g. after the screen color space
+// changed and the decoded pixels must be reconverted.
+#[derive(Message)]
+struct ReloadImagesEvent;
+
 #[derive(Message)]
 struct NavigateReviewEvent(i32); // +1 next, -1 previous
 
@@ -857,6 +929,7 @@ fn ui_settings_menu(
     mut change_title_style_evw: MessageWriter<ChangeTitleStyleEvent>,
     mut save_settings_evw: MessageWriter<SaveSettingsEvent>,
     mut change_sampler_evw: MessageWriter<ChangeSamplerEvent>,
+    mut reload_images_evw: MessageWriter<ReloadImagesEvent>,
     mut next_state: ResMut<NextState<MyAppState>>,
     mut panel_area: ResMut<UiPanelArea>,
 ) {
@@ -897,6 +970,24 @@ fn ui_settings_menu(
                                 .changed();
                             if r1 || r2 {
                                 change_sampler_evw.write(ChangeSamplerEvent);
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Screen Color Space:")
+                        .on_hover_text("Color space of the physical screen; images are converted to it");
+                    egui::ComboBox::from_id_salt("screen_color_space")
+                        .selected_text(config.color.screen_color_space.label())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            for space in ScreenColorSpace::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut config.color.screen_color_space, space, space.label())
+                                    .changed();
+                            }
+                            if changed {
+                                reload_images_evw.write(ReloadImagesEvent);
                             }
                         });
                 });
@@ -1276,10 +1367,8 @@ fn on_load_image(
             println!("Failed to decode image: {}", ev.path);
             continue;
         };
-        let image = match icc_profile {
-            Some(icc) if !icc.is_empty() => convert_to_srgb(image, &icc, &ev.path),
-            _ => image,
-        };
+        let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
+        let image = convert_to_screen_space(image, icc, config.color.screen_color_space, &ev.path);
 
         let loaded_image = match image.color() {
             ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => Image::from_dynamic(
@@ -2091,11 +2180,10 @@ fn save_cropped(
                 println!("Failed to decode image");
                 continue;
             };
-            // The crop is saved without a profile, so convert to sRGB like the display path
-            let image = match icc_profile {
-                Some(icc) if !icc.is_empty() => convert_to_srgb(image, &icc, &path.0),
-                _ => image,
-            };
+            // The crop is saved without a profile and may be opened anywhere,
+            // so it is always converted to sRGB, not to the screen color space.
+            let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
+            let image = convert_to_screen_space(image, icc, ScreenColorSpace::Srgb, &path.0);
             // reader don't preserve the input format and append an alpha channel
             let image_rgb8 = image.to_rgb8();
 
@@ -2397,6 +2485,36 @@ mod macos_dock_drop {
         } else {
             println!("macOS dock drop: failed to inject handler (method may already exist)");
         }
+    }
+}
+
+// Reload all open images from disk, preserving the current zoom/pan.
+// Needed when the screen color space changes: conversion happens at decode
+// time, so the pixels already uploaded are in the previous space.
+fn on_reload_images(
+    mut reload_evr: MessageReader<ReloadImagesEvent>,
+    mut is_new_batch: ResMut<NewImageBatch>,
+    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut preserved: ResMut<PreservedView>,
+    global_scale: Res<GlobalScale>,
+    view_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
+    path_query: Query<(&Id, &ImagePath), With<MyImage>>,
+) {
+    if reload_evr.is_empty() {
+        return;
+    }
+    reload_evr.clear();
+
+    let mut id_paths: Vec<(usize, String)> = path_query.iter().map(|(id, path)| (id.0, path.0.clone())).collect();
+    if id_paths.is_empty() {
+        return;
+    }
+    id_paths.sort_by_key(|(id, _)| *id);
+
+    capture_view(&mut preserved, global_scale.0, &view_query);
+    is_new_batch.0 = true;
+    for (index, path) in id_paths {
+        load_image_evw.write(LoadNewImageEvent { path, index });
     }
 }
 
