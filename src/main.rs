@@ -17,7 +17,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::camera::Hdr;
 use bevy::window::{PresentMode, WindowResized, WindowResolution};
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
@@ -214,6 +214,7 @@ fn main() -> Result<()> {
             pressed: false,
         })
         .insert_resource(ImageOrder(Vec::new()))
+        .init_resource::<UiPanelArea>()
         .insert_resource(ReviewState::default())
         .insert_resource(PreservedView::default())
         .add_systems(Startup, setup)
@@ -241,8 +242,8 @@ fn main() -> Result<()> {
             (
                 ui_bottom_menu,
                 ui_image_list_panel.after(ui_bottom_menu),
-                ui_settings_menu.after(ui_bottom_menu),
-                ui_review_panel.after(ui_bottom_menu),
+                ui_settings_menu.after(ui_image_list_panel),
+                ui_review_panel.after(ui_settings_menu),
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -320,6 +321,60 @@ fn main() -> Result<()> {
 // MARK: State Struct
 #[derive(Debug, Resource)]
 struct MultiCursorEnabled(bool);
+
+// Screen area not yet consumed by egui panels. Panels are drawn inside a root
+// Ui and stack by shrinking its available rect, but our panels are spread over
+// several bevy systems that each build their own root Ui, so the leftover area
+// must be carried from one system to the next. Always go through
+// PanelRootUi::new(): the guard writes the leftover area back on drop, and the
+// pass number resets the area to the full viewport once per egui pass.
+#[derive(Resource, Default)]
+struct UiPanelArea {
+    pass_nr: u64,
+    rect: Option<egui::Rect>,
+}
+
+struct PanelRootUi<'a> {
+    ui: egui::Ui,
+    area: &'a mut UiPanelArea,
+}
+
+impl<'a> PanelRootUi<'a> {
+    fn new(ctx: &egui::Context, id: &str, area: &'a mut UiPanelArea) -> Self {
+        let pass_nr = ctx.cumulative_pass_nr();
+        if area.pass_nr != pass_nr {
+            area.pass_nr = pass_nr;
+            area.rect = None;
+        }
+        let ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new(id),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(area.rect.unwrap_or_else(|| ctx.viewport_rect())),
+        );
+        PanelRootUi { ui, area }
+    }
+}
+
+impl Drop for PanelRootUi<'_> {
+    fn drop(&mut self) {
+        self.area.rect = Some(self.ui.available_rect_before_wrap());
+    }
+}
+
+impl std::ops::Deref for PanelRootUi<'_> {
+    type Target = egui::Ui;
+    fn deref(&self) -> &egui::Ui {
+        &self.ui
+    }
+}
+
+impl std::ops::DerefMut for PanelRootUi<'_> {
+    fn deref_mut(&mut self) -> &mut egui::Ui {
+        &mut self.ui
+    }
+}
 
 #[derive(Resource)]
 struct UiState {
@@ -515,15 +570,15 @@ fn setup(
     }
 
     let bytes = include_bytes!("../assets/fonts/IBMPlexMono-Regular.otf");
-    let font = Font::try_from_bytes(bytes.to_vec()).unwrap();
+    let font = Font::from_bytes(bytes.to_vec());
     let font_handle = fonts.add(font);
     commands.spawn(FontHandle(font_handle.clone()));
 
     commands.spawn((
         Text::new(HELP_STRING),
         TextFont {
-            font: font_handle,
-            font_size: 15.0,
+            font: font_handle.into(),
+            font_size: FontSize::Px(15.0),
             ..default()
         },
         TextColor(Color::Srgba(bevy::color::palettes::css::ANTIQUE_WHITE)),
@@ -592,10 +647,12 @@ fn ui_bottom_menu(
     mut add_mode: ResMut<AddMode>,
     mut review_state: ResMut<ReviewState>,
     mut activate_evw: MessageWriter<ActivateReviewEvent>,
+    mut panel_area: ResMut<UiPanelArea>,
 ) {
     if ui_state.visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
-        egui::TopBottomPanel::bottom("wrap_app_top_bar").show(ctx, |ui| {
+        let mut root = PanelRootUi::new(ctx, "root_bottom_menu", &mut panel_area);
+        egui::Panel::bottom("wrap_app_top_bar").show(&mut root, |ui| {
             // equivalent to horizontal_wrapped but with a small factor on y to avoid the clip of button
             let initial_size = egui::vec2(ui.available_size_before_wrap().x, ui.spacing().interact_size.y * 1.2);
             ui.allocate_ui_with_layout(
@@ -692,10 +749,12 @@ fn ui_settings_menu(
     mut save_settings_evw: MessageWriter<SaveSettingsEvent>,
     mut change_sampler_evw: MessageWriter<ChangeSamplerEvent>,
     mut next_state: ResMut<NextState<MyAppState>>,
+    mut panel_area: ResMut<UiPanelArea>,
 ) {
     if ui_state.settings_panel_visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
-        egui::SidePanel::right("Settings").resizable(false).show(ctx, |ui| {
+        let mut root = PanelRootUi::new(ctx, "root_settings", &mut panel_area);
+        egui::Panel::right("Settings").resizable(false).show(&mut root, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Settings");
                 ui.hyperlink_to(
@@ -833,9 +892,10 @@ fn ui_settings_menu(
     }
 }
 
-fn ui_edit_short_cut(mut contexts: EguiContexts) {
+fn ui_edit_short_cut(mut contexts: EguiContexts, mut panel_area: ResMut<UiPanelArea>) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::CentralPanel::default().show(ctx, |ui| {
+    let mut root = PanelRootUi::new(ctx, "root_edit_short_cut", &mut panel_area);
+    egui::CentralPanel::default().show(&mut root, |ui| {
         ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
             ui.heading("Press short cut key");
         })
@@ -849,6 +909,7 @@ fn ui_image_list_panel(
     image_path_query: Query<(&Id, &ImagePath), With<MyImage>>,
     mut remove_image_evw: MessageWriter<RemoveImageEvent>,
     mut reorder_evw: MessageWriter<ReorderImagesEvent>,
+    mut panel_area: ResMut<UiPanelArea>,
 ) {
     if !ui_state.image_list_visible {
         return;
@@ -862,10 +923,11 @@ fn ui_image_list_panel(
         name_map.push((id.0, short.to_string()));
     }
 
-    egui::SidePanel::left("Image List")
+    let mut root = PanelRootUi::new(ctx, "root_image_list", &mut panel_area);
+    egui::Panel::left("Image List")
         .resizable(true)
-        .default_width(180.)
-        .show(ctx, |ui| {
+        .default_size(180.)
+        .show(&mut root, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Images");
             });
@@ -1179,8 +1241,8 @@ fn on_image_loaded(
         commands.spawn((
             Text::new(short_path),
             TextFont {
-                font: font.0.clone(),
-                font_size: config.text.font_size,
+                font: font.0.clone().into(),
+                font_size: FontSize::Px(config.text.font_size),
                 ..default()
             },
             TextColor(config.text.font_color),
@@ -1328,7 +1390,7 @@ fn change_image_title_style(
 
     for (mut text_font, mut text_color) in &mut text_query {
         *text_color = TextColor(config.text.font_color);
-        text_font.font_size = config.text.font_size;
+        text_font.font_size = FontSize::Px(config.text.font_size);
     }
 }
 
@@ -1991,7 +2053,7 @@ fn change_sampler(
     };
 
     for sprite in &sprite_query {
-        let Some(image) = images.get_mut(&sprite.image) else {
+        let Some(mut image) = images.get_mut(&sprite.image) else {
             continue;
         };
         image.sampler = new_sampler.clone();
@@ -2168,9 +2230,8 @@ mod macos_dock_drop {
     // Signature: void(id self, SEL _cmd, id application, id urls)
     unsafe extern "C" fn handle_open_urls(_this: &AnyObject, _cmd: Sel, _sender: &AnyObject, urls: &NSArray<NSURL>) {
         let mut paths = Vec::new();
-        for i in 0..urls.len() {
-            let Some(url) = urls.get(i) else { continue };
-            let Some(ns_path) = (unsafe { url.path() }) else {
+        for url in urls.iter() {
+            let Some(ns_path) = url.path() else {
                 continue;
             };
             let path = ns_path.to_string();
@@ -2189,7 +2250,7 @@ mod macos_dock_drop {
     // Inject application:openURLs: into WinitApplicationDelegate at runtime.
     // Must be called after the event loop is created (so the class is registered).
     pub fn inject_open_urls_handler() {
-        let Some(cls) = AnyClass::get("WinitApplicationDelegate") else {
+        let Some(cls) = AnyClass::get(c"WinitApplicationDelegate") else {
             println!("macOS dock drop: WinitApplicationDelegate class not found, skipping");
             return;
         };
@@ -2198,12 +2259,12 @@ mod macos_dock_drop {
         // Type encoding: void(id, SEL, id, id) = "v@:@@"
         let types = c"v@:@@";
         let imp: Imp = unsafe { std::mem::transmute(handle_open_urls as *const ()) };
-        let cls_ptr = cls as *const AnyClass as *mut ffi::objc_class;
+        let cls_ptr = cls as *const AnyClass as *mut AnyClass;
 
         // SAFETY: cls_ptr points to a valid, registered ObjC class. The selector, type encoding,
         // and function signature all match the application:openURLs: delegate method.
-        let ok = unsafe { ffi::class_addMethod(cls_ptr, sel.as_ptr(), Some(imp), types.as_ptr()) };
-        if ok {
+        let ok = unsafe { ffi::class_addMethod(cls_ptr, sel, imp, types.as_ptr()) };
+        if ok.as_bool() {
             println!("macOS dock drop: injected application:openURLs: handler");
         } else {
             println!("macOS dock drop: failed to inject handler (method may already exist)");
@@ -2413,12 +2474,14 @@ fn ui_review_panel(
     mut refresh_evw: MessageWriter<RefreshReviewEvent>,
     mut activate_evw: MessageWriter<ActivateReviewEvent>,
     ui_state: Res<UiState>,
+    mut panel_area: ResMut<UiPanelArea>,
 ) {
     if !ui_state.visible || !review_state.enabled {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::TopBottomPanel::bottom("review_bar").show(ctx, |ui| {
+    let mut root = PanelRootUi::new(ctx, "root_review", &mut panel_area);
+    egui::Panel::bottom("review_bar").show(&mut root, |ui| {
         ui.horizontal(|ui| {
             if let Some(error) = &review_state.error {
                 ui.colored_label(egui::Color32::from_rgb(255, 150, 100), error.as_str());

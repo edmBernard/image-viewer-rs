@@ -10,8 +10,8 @@ description = "Image Viewer that allow comparison side-by-side, in grid or in st
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.18", features = ["serialize", "jpeg", "bmp", "bevy_render"] }
-bevy_egui = "0.39"
+bevy = { version = "0.19", features = ["serialize", "jpeg", "bmp", "bevy_render"] }
+bevy_egui = "0.41"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
 home = "0.5"
@@ -24,8 +24,8 @@ regex = "1"
 tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSString", "NSURL", "NSArray"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray"] }
 
 [build-dependencies]
 winresource = "0.1.30"
