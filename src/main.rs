@@ -10,19 +10,20 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::Hdr;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::camera::Hdr;
 use bevy::window::{PresentMode, WindowResized, WindowResolution};
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
-use image::{ColorType, DynamicImage, ImageFormat, SubImage};
+use image::{ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, Pixel, SubImage};
+use moxcms::{CmsError, ColorProfile, DataColorSpace, Layout, TransformExecutor, TransformOptions};
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
@@ -315,6 +316,114 @@ fn main() -> Result<()> {
         .add_systems(Update, poll_dock_drop_queue.run_if(in_state(MyAppState::Working)))
         .run();
 
+    Ok(())
+}
+
+// MARK: Color Management
+// Images carrying an ICC profile (Display P3, Adobe RGB, ...) are converted to
+// sRGB when decoded, so all images are compared in the same color space and
+// match the sRGB interpretation of the GPU textures.
+
+fn convert_to_srgb(mut image: DynamicImage, icc: &[u8], path: &str) -> DynamicImage {
+    let profile = match ColorProfile::new_from_slice(icc) {
+        Ok(profile) => profile,
+        Err(e) => {
+            println!("{path}: ignoring unreadable ICC profile: {e}");
+            return image;
+        }
+    };
+
+    let is_gray = matches!(
+        image.color(),
+        ColorType::L8 | ColorType::La8 | ColorType::L16 | ColorType::La16
+    );
+    // The decoded buffers are RGB or grayscale; a profile for another space
+    // (e.g. CMYK, the decoder already converted those pixels) can't apply.
+    let expected_space = if is_gray { DataColorSpace::Gray } else { DataColorSpace::Rgb };
+    if profile.color_space != expected_space {
+        println!(
+            "{path}: ICC profile is for {:?} but pixels are {:?}, profile ignored",
+            profile.color_space,
+            image.color()
+        );
+        return image;
+    }
+
+    let result = match &mut image {
+        DynamicImage::ImageLuma8(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageLumaA8(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageRgb8(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageRgba8(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageLuma16(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageLumaA16(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageRgb16(buf) => icc_image_to_srgb(&profile, buf),
+        DynamicImage::ImageRgba16(buf) => icc_image_to_srgb(&profile, buf),
+        // f32 formats are not loaded by this app
+        _ => Ok(()),
+    };
+    if let Err(e) = result {
+        println!("{path}: ICC conversion to sRGB failed, image kept as-is: {e}");
+    }
+    image
+}
+
+// Sample types moxcms can transform; picks the executor matching the bit depth.
+trait IccSample: image::Primitive + Default {
+    fn create_to_srgb_transform(
+        profile: &ColorProfile,
+        layout: Layout,
+    ) -> std::result::Result<Arc<dyn TransformExecutor<Self> + Send + Sync>, CmsError>;
+}
+
+impl IccSample for u8 {
+    fn create_to_srgb_transform(
+        profile: &ColorProfile,
+        layout: Layout,
+    ) -> std::result::Result<Arc<dyn TransformExecutor<u8> + Send + Sync>, CmsError> {
+        profile.create_transform_8bit(layout, &ColorProfile::new_srgb(), layout, TransformOptions::default())
+    }
+}
+
+impl IccSample for u16 {
+    fn create_to_srgb_transform(
+        profile: &ColorProfile,
+        layout: Layout,
+    ) -> std::result::Result<Arc<dyn TransformExecutor<u16> + Send + Sync>, CmsError> {
+        profile.create_transform_16bit(layout, &ColorProfile::new_srgb(), layout, TransformOptions::default())
+    }
+}
+
+fn icc_image_to_srgb<P>(
+    profile: &ColorProfile,
+    buf: &mut ImageBuffer<P, Vec<P::Subpixel>>,
+) -> std::result::Result<(), CmsError>
+where
+    P: Pixel,
+    P::Subpixel: IccSample,
+{
+    let layout = match P::CHANNEL_COUNT {
+        1 => Layout::Gray,
+        2 => Layout::GrayAlpha,
+        3 => Layout::Rgb,
+        _ => Layout::Rgba,
+    };
+    let row_len = buf.width() as usize * P::CHANNEL_COUNT as usize;
+    let transform = P::Subpixel::create_to_srgb_transform(profile, layout)?;
+    transform_rows_in_place(transform.as_ref(), buf, row_len)
+}
+
+// The executor needs distinct source and destination slices; going row by row
+// through a scratch buffer avoids duplicating the whole image.
+fn transform_rows_in_place<V: Copy + Default>(
+    transform: &dyn TransformExecutor<V>,
+    data: &mut [V],
+    row_len: usize,
+) -> std::result::Result<(), CmsError> {
+    let mut scratch = vec![V::default(); row_len];
+    for row in data.chunks_exact_mut(row_len) {
+        scratch.copy_from_slice(row);
+        transform.transform(&scratch, row)?;
+    }
     Ok(())
 }
 
@@ -1158,9 +1267,18 @@ fn on_load_image(
         // This is required to process large images that would otherwise be rejected by the image crate
         reader.no_limits();
 
-        let Some(image) = reader.decode().ok() else {
+        let Some(mut decoder) = reader.into_decoder().ok() else {
             println!("Failed to decode image: {}", ev.path);
             continue;
+        };
+        let icc_profile = decoder.icc_profile().ok().flatten();
+        let Some(image) = DynamicImage::from_decoder(decoder).ok() else {
+            println!("Failed to decode image: {}", ev.path);
+            continue;
+        };
+        let image = match icc_profile {
+            Some(icc) if !icc.is_empty() => convert_to_srgb(image, &icc, &ev.path),
+            _ => image,
         };
 
         let loaded_image = match image.color() {
@@ -1964,9 +2082,19 @@ fn save_cropped(
             // This is required to process large images that would otherwise be rejected by the image crate
             reader.no_limits();
 
-            let Some(image) = reader.decode().ok() else {
+            let Some(mut decoder) = reader.into_decoder().ok() else {
                 println!("Failed to decode image");
                 continue;
+            };
+            let icc_profile = decoder.icc_profile().ok().flatten();
+            let Some(image) = DynamicImage::from_decoder(decoder).ok() else {
+                println!("Failed to decode image");
+                continue;
+            };
+            // The crop is saved without a profile, so convert to sRGB like the display path
+            let image = match icc_profile {
+                Some(icc) if !icc.is_empty() => convert_to_srgb(image, &icc, &path.0),
+                _ => image,
             };
             // reader don't preserve the input format and append an alpha channel
             let image_rgb8 = image.to_rgb8();
