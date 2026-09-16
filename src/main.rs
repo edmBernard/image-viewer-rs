@@ -36,6 +36,9 @@ struct Args {
     images: Vec<String>,
 }
 
+// Largest 2D texture side accepted by the GPU (Metal on Apple GPUs). Wider or taller images are split into tiles.
+const MAX_TEXTURE_SIZE: u32 = 16384;
+
 const HELP_STRING: &str = "Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
     Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
@@ -666,6 +669,22 @@ struct MyCursor;
 #[derive(Component)]
 struct MyImage;
 
+// Full image size in pixels. The image entity has no Sprite of its own (the texture lives on tile children).
+#[derive(Component)]
+struct ImageSize(Vec2);
+
+// Region of the image currently shown in its cell, in image pixel coordinates
+#[derive(Component, Default)]
+struct ViewRect(Option<Rect>);
+
+// Child of a MyImage entity holding one texture tile of the image
+#[derive(Component)]
+struct MyTile;
+
+// Area of the full image covered by a tile, in image pixel coordinates
+#[derive(Component)]
+struct TileRect(Rect);
+
 #[derive(Component)]
 struct MyText;
 
@@ -700,9 +719,15 @@ struct ResetVisibilityEvent;
 #[derive(Message)]
 struct ChangeSamplerEvent;
 
+struct ImageTile {
+    handle: Handle<Image>,
+    rect: Rect,
+}
+
 #[derive(Message)]
 struct NewImageLoadedEvent {
-    handle: Handle<Image>,
+    tiles: Vec<ImageTile>,
+    size: Vec2,
     path: String,
     index: usize,
 }
@@ -1370,41 +1395,78 @@ fn on_load_image(
         let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
         let image = convert_to_screen_space(image, icc, config.color.screen_color_space, &ev.path);
 
-        let loaded_image = match image.color() {
-            ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => Image::from_dynamic(
-                image,
-                true,
-                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-            ),
-            ColorType::Rgb16 | ColorType::Rgba16 => Image::from_dynamic(
-                image,
-                true,
-                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-            ),
-            ColorType::L16 => {
-                let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
-                Image::from_dynamic(
-                    image_rgb16,
-                    true,
-                    RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                )
-            }
-            _ => {
-                println!("Unsupported image type : image.color(): {:?}", image.color());
-                continue;
-            }
-        };
-        let mut loaded_image = loaded_image;
-        loaded_image.sampler = match config.misc.sampler_mode {
+        let sampler = match config.misc.sampler_mode {
             SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
             SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
         };
-        let handle = images.add(loaded_image);
+
+        let size = Vec2::new(image.width() as f32, image.height() as f32);
+        let tile_rects = tile_grid(image.width(), image.height(), MAX_TEXTURE_SIZE);
+        // A single tile takes the decoded buffer as is; larger images are copied tile by tile
+        let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
+            vec![(tile_rects[0], image)]
+        } else {
+            tile_rects
+                .into_iter()
+                .map(|r| (r, image.crop_imm(r.min.x, r.min.y, r.width(), r.height())))
+                .collect()
+        };
+
+        let mut tiles = Vec::with_capacity(tile_images.len());
+        for (rect, tile_image) in tile_images {
+            let Some(mut texture) = to_texture(tile_image) else {
+                break;
+            };
+            texture.sampler = sampler.clone();
+            tiles.push(ImageTile {
+                handle: images.add(texture),
+                rect: rect.as_rect(),
+            });
+        }
+        if tiles.is_empty() {
+            continue;
+        }
         loaded_evw.write(NewImageLoadedEvent {
-            handle: handle,
+            tiles,
+            size,
             path: ev.path.clone(),
             index: ev.index,
         });
+    }
+}
+
+// Split a width x height image into the fewest equally sized tiles whose sides fit in max_size
+fn tile_grid(width: u32, height: u32, max_size: u32) -> Vec<URect> {
+    let cols = width.div_ceil(max_size).max(1);
+    let rows = height.div_ceil(max_size).max(1);
+    let tile_size = UVec2::new(width.div_ceil(cols), height.div_ceil(rows));
+    let image_size = UVec2::new(width, height);
+    let mut rects = Vec::with_capacity((cols * rows) as usize);
+    for row in 0..rows {
+        for col in 0..cols {
+            let min = UVec2::new(col, row) * tile_size;
+            let max = (min + tile_size).min(image_size);
+            rects.push(URect { min, max });
+        }
+    }
+    rects
+}
+
+fn to_texture(image: DynamicImage) -> Option<Image> {
+    let usages = RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD;
+    match image.color() {
+        ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
+            Some(Image::from_dynamic(image, true, usages))
+        }
+        ColorType::Rgb16 | ColorType::Rgba16 => Some(Image::from_dynamic(image, true, usages)),
+        ColorType::L16 => {
+            let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
+            Some(Image::from_dynamic(image_rgb16, true, usages))
+        }
+        _ => {
+            println!("Unsupported image type : image.color(): {:?}", image.color());
+            None
+        }
     }
 }
 
@@ -1429,20 +1491,33 @@ fn on_image_loaded(
             is_new_batch.0 = false;
         }
 
-        // Start hidden; on_move_image will make it visible after positioning
-        commands.spawn((
-            Sprite {
-                image: ev.handle.clone(),
-                ..default()
-            },
-            Visibility::Hidden,
-            Id(ev.index),
-            Scale(1.),
-            Position(Vec2::ZERO),
-            Rotation(0),
-            ImagePath(ev.path.clone()),
-            MyImage,
-        ));
+        // Start hidden; on_move_image will make it visible after positioning.
+        // The image entity carries the view state; each tile child carries one texture.
+        commands
+            .spawn((
+                Transform::default(),
+                Visibility::Hidden,
+                Id(ev.index),
+                Scale(1.),
+                Position(Vec2::ZERO),
+                Rotation(0),
+                ImagePath(ev.path.clone()),
+                ImageSize(ev.size),
+                ViewRect::default(),
+                MyImage,
+            ))
+            .with_children(|parent| {
+                for tile in &ev.tiles {
+                    parent.spawn((
+                        Sprite {
+                            image: tile.handle.clone(),
+                            ..default()
+                        },
+                        TileRect(tile.rect),
+                        MyTile,
+                    ));
+                }
+            });
 
         let short_path = get_short_name(&ev.path).unwrap_or("");
         commands.spawn((
@@ -1477,11 +1552,21 @@ fn on_image_loaded(
 fn on_move_image(
     mut move_image_evr: MessageReader<MoveImageEvent>,
     windows: Query<&Window>,
-    assets: Res<Assets<Image>>,
     mut sprite_position: Query<
-        (&Id, &Position, &Scale, &Rotation, &mut Transform, &mut Sprite, &mut Visibility),
+        (
+            &Id,
+            &Position,
+            &Scale,
+            &Rotation,
+            &ImageSize,
+            &mut ViewRect,
+            &mut Transform,
+            &mut Visibility,
+            &Children,
+        ),
         With<MyImage>,
     >,
+    mut tiles: Query<(&TileRect, &mut Sprite, &mut Transform, &mut Visibility), (With<MyTile>, Without<MyImage>)>,
     global_scale: Res<GlobalScale>,
     global_rotation: Res<GlobalRotation>,
     layout_state: Res<GridLayoutState>,
@@ -1499,12 +1584,10 @@ fn on_move_image(
         return;
     }
     let num_images = sprite_position.iter().count();
-    for (id, position, scale, rotation, mut transform, mut sprite, mut visibility) in &mut sprite_position {
-        let image_handle = sprite.image.clone();
-        let Some(image) = assets.get(&image_handle) else {
-            continue;
-        };
-        let image_size = image.size().as_vec2();
+    for (id, position, scale, rotation, image_size, mut view_rect, mut transform, mut visibility, children) in
+        &mut sprite_position
+    {
+        let image_size = image_size.0;
 
         let (cell_offset, cell_size) =
             get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
@@ -1532,7 +1615,27 @@ fn on_move_image(
             (rotated_cell_size - 2.) / (scale.0 * global_scale.0),
         );
 
-        sprite.rect = Some(cell.intersect(image_crop));
+        let view = cell.intersect(image_crop);
+        view_rect.0 = Some(view);
+
+        // Each tile shows its share of the view, offset from the view center in image pixels.
+        // The parent transform applies scale and rotation, so child translations stay in image space.
+        for child in children.iter() {
+            let Ok((tile, mut sprite, mut tile_transform, mut tile_visibility)) = tiles.get_mut(child) else {
+                continue;
+            };
+            let tile_view = view.intersect(tile.0);
+            if tile_view.is_empty() {
+                *tile_visibility = Visibility::Hidden;
+                continue;
+            }
+            *tile_visibility = Visibility::Inherited;
+            sprite.rect = Some(Rect {
+                min: tile_view.min - tile.0.min,
+                max: tile_view.max - tile.0.min,
+            });
+            tile_transform.translation = ((tile_view.center() - view.center()) * Vec2::new(1., -1.)).extend(0.);
+        }
 
         // Make visible after positioning (sprites start hidden to avoid flash at native resolution)
         *visibility = match layout_state.layout {
@@ -2057,9 +2160,8 @@ fn on_image_spawned(
 fn fit_to_screen(
     mut fit_to_screen_evr: MessageReader<FitToScreen>,
     windows: Query<&Window>,
-    assets: Res<Assets<Image>>,
     mut global_scale: ResMut<GlobalScale>,
-    mut sprite_query: Query<(&Id, &Sprite, &mut Scale, &mut Position), With<MyImage>>,
+    mut sprite_query: Query<(&Id, &ImageSize, &mut Scale, &mut Position), With<MyImage>>,
     layout_state: Res<GridLayoutState>,
     config: Res<Config>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
@@ -2074,7 +2176,7 @@ fn fit_to_screen(
         // When switching review sets we reuse the previous zoom/pan instead of refitting.
         if preserved.pending {
             global_scale.0 = preserved.global_scale;
-            for (id, _sprite, mut scale, mut position) in &mut sprite_query {
+            for (id, _size, mut scale, mut position) in &mut sprite_query {
                 if let Some(&(cell_scale, cell_position)) = preserved.cells.get(&id.0) {
                     scale.0 = cell_scale;
                     position.0 = cell_position;
@@ -2088,11 +2190,8 @@ fn fit_to_screen(
         let num_images = sprite_query.iter().count();
 
         let mut first = true;
-        for (id, sprite, mut scale, mut position) in &mut sprite_query {
-            let Some(image) = assets.get(&sprite.image) else {
-                continue;
-            };
-            let image_size = image.size().as_vec2();
+        for (id, image_size, mut scale, mut position) in &mut sprite_query {
+            let image_size = image_size.0;
             let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
             let factor = f32::min(cell_size.x / image_size.x, cell_size.y / image_size.y);
 
@@ -2149,10 +2248,10 @@ fn insert_suffix(path: &Path, suffix: &str) -> Option<std::path::PathBuf> {
 
 fn save_cropped(
     mut save_cropped_evr: MessageReader<SaveCropped>,
-    image_query: Query<(&ImagePath, &Sprite), With<MyImage>>,
+    image_query: Query<(&ImagePath, &ViewRect), With<MyImage>>,
 ) {
     for _ev in save_cropped_evr.read() {
-        for (path, sprite) in &image_query {
+        for (path, view_rect) in &image_query {
             // Get Input image
             let input_path = Path::new(&path.0);
             let Some(f_in) = File::open(&input_path).ok() else {
@@ -2199,8 +2298,8 @@ fn save_cropped(
             };
             let mut buf_out = BufWriter::new(f_out);
 
-            // Get Roi from sprite
-            let Some(rect) = sprite.rect else {
+            // Get Roi from the current view
+            let Some(rect) = view_rect.0 else {
                 println!("Failed to get ROI of the texture");
                 continue;
             };
@@ -2255,7 +2354,7 @@ fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config
 fn change_sampler(
     mut change_sampler_evr: MessageReader<ChangeSamplerEvent>,
     config: Res<Config>,
-    sprite_query: Query<&Sprite, With<MyImage>>,
+    sprite_query: Query<&Sprite, With<MyTile>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if change_sampler_evr.is_empty() {
