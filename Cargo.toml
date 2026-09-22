@@ -10,7 +10,25 @@ description = "Image Viewer that allow comparison side-by-side, in grid or in st
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.19", features = ["serialize", "jpeg", "bmp", "bevy_render"] }
+bevy = { version = "0.19", default-features = false, features = [
+	"default_app",
+	"std",
+	"2d_bevy_render",
+	"ui_bevy_render",
+	"bevy_winit",
+	"default_font",
+	"multi_threaded",
+	"keyboard",
+	"mouse",
+	"touch",
+	"x11",
+	"wayland",
+	"tonemapping_luts",
+	"zstd_rust",
+	"serialize",
+	"jpeg",
+	"bmp",
+] }
 bevy_egui = "0.41"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"

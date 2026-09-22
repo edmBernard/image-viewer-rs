@@ -14,6 +14,18 @@ A cross-platform image viewer for comparing images side-by-side, in grids, stack
 
 By default, dropping new images replaces the current set. Enable **Add Mode** (`Q` key or the "Add" toggle in the bottom bar) to append images instead.
 
+#### Linux Drag and Drop
+
+The current Winit 0.30 window backend supports file drops on X11, but not native Wayland. On a Wayland desktop, launch through XWayland to use drag and drop:
+
+```bash
+env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET image-viewer img1.png
+```
+
+When running from source, use `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo run -- img1.png` instead. Run this from a graphical terminal with `DISPLAY` set and XWayland available. Unsetting both Wayland variables selects X11 for this process only; it does not change your desktop session. Drops from native Wayland file managers also depend on the compositor's XWayland drag-and-drop bridge.
+
+Native Wayland remains available for viewing images supplied on the command line. On an X11 desktop, no workaround is needed.
+
 ### Layouts
 
 Four layout modes are available:
