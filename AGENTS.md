@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository.
 
 ## Project Overview
 
-A cross-platform image viewer built with **Bevy 0.18** and Rust. Uses Bevy's Entity-Component-System architecture. Supports comparing images side-by-side, in grids, stacked, or in horizontal/vertical layouts. Includes a review mode for navigating through sets of related images using pattern matching.
+A cross-platform image viewer built with **Bevy 0.20** and Rust. Uses Bevy's Entity-Component-System architecture. Supports comparing images side-by-side, in grids, stacked, or in horizontal/vertical layouts. Includes a review mode for navigating through sets of related images using pattern matching.
 
 ## Build & Development Commands
 
@@ -37,7 +37,7 @@ Imports -> Type alias -> CLI args (clap) -> Constants -> App states -> Enums -> 
 
 - **Components**: newtype tuple structs (`Id(usize)`, `Scale(f32)`, `Position(Vec2)`) or unit marker structs (`MyImage`, `MyCursor`, `MyText`). All derive `Component`.
 - **Resources**: newtype tuples or named-field structs. All derive `Resource`.
-- **Events**: called "Messages" in Bevy 0.18. Use `#[derive(Message)]`. Written via `MessageWriter<T>`, read via `MessageReader<T>`.
+- **Events**: called "Messages" in Bevy 0.20. Use `#[derive(Message)]`. Written via `MessageWriter<T>`, read via `MessageReader<T>`.
 - **Entity spawning**: use inline tuple bundles, not custom `Bundle` structs.
 - **System registration**: grouped in `add_systems(Update, (...).run_if(in_state(...)))` tuples. Bevy limits anonymous sets to 20 systems, so there are multiple `add_systems` blocks. Egui systems use `EguiPrimaryContextPass` schedule instead of `Update`.
 
@@ -155,8 +155,8 @@ Rules:
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| bevy | 0.18 | ECS framework, rendering, windowing |
-| bevy_egui | 0.39 | Immediate-mode UI integration |
+| bevy | 0.20 | ECS framework, rendering, windowing |
+| bevy_egui | 0.43 | Immediate-mode UI integration |
 | clap | 4 | CLI argument parsing (derive mode) |
 | image | 0.25 | Image format decoding/encoding |
 | serde + toml | 1 | Configuration serialization |
