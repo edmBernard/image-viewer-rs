@@ -3,6 +3,7 @@
 
 mod review;
 
+use std::env::home_dir;
 use std::f32::consts::{PI, TAU};
 use std::fs::canonicalize;
 use std::fs::File;
@@ -18,6 +19,7 @@ use bevy::camera::Hdr;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
 use bevy::window::{PresentMode, WindowResized, WindowResolution};
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
@@ -36,8 +38,9 @@ struct Args {
     images: Vec<String>,
 }
 
-// Largest 2D texture side accepted by the GPU (Metal on Apple GPUs). Wider or taller images are split into tiles.
-const MAX_TEXTURE_SIZE: u32 = 16384;
+// Largest 2D texture side assumed when the render device isn't available yet (most Apple GPUs on Metal).
+// Otherwise the device limit is used. Wider or taller images are split into tiles.
+const FALLBACK_MAX_TEXTURE_SIZE: u32 = 16384;
 
 const HELP_STRING: &str = "Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
@@ -169,7 +172,7 @@ struct Config {
     shortcut: ConfigShortcut,
     hdr: ConfigHDR,
     misc: ConfigMisc,
-// default so config files predating this section keep loading
+    // default so config files predating this section keep loading
     #[serde(default)]
     color: ConfigColor,
 }
@@ -180,7 +183,7 @@ fn main() -> Result<()> {
     let images_filename = check_all_images_exist(&args.images)?;
 
     let user_config_data = 'block: {
-        let Some(home_directory) = home::home_dir() else {
+        let Some(home_directory) = home_dir() else {
             println!("User directory not found");
             break 'block None;
         };
@@ -386,11 +389,11 @@ fn convert_to_screen_space(
 ) -> DynamicImage {
     let src_profile = match icc {
         Some(icc) => match ColorProfile::new_from_slice(icc) {
-        Ok(profile) => profile,
-        Err(e) => {
-            println!("{path}: ignoring unreadable ICC profile: {e}");
-            return image;
-        }
+            Ok(profile) => profile,
+            Err(e) => {
+                println!("{path}: ignoring unreadable ICC profile: {e}");
+                return image;
+            }
         },
         // Untagged images are assumed sRGB: already in place for an sRGB
         // screen, otherwise they need the conversion like everything else.
@@ -404,7 +407,11 @@ fn convert_to_screen_space(
     );
     // The decoded buffers are RGB or grayscale; a profile for another space
     // (e.g. CMYK, the decoder already converted those pixels) can't apply.
-    let expected_space = if is_gray { DataColorSpace::Gray } else { DataColorSpace::Rgb };
+    let expected_space = if is_gray {
+        DataColorSpace::Gray
+    } else {
+        DataColorSpace::Rgb
+    };
     if src_profile.color_space != expected_space {
         println!(
             "{path}: ICC profile is for {:?} but pixels are {:?}, profile ignored",
@@ -1365,7 +1372,12 @@ fn on_load_image(
     mut loaded_evw: MessageWriter<NewImageLoadedEvent>,
     mut images: ResMut<Assets<Image>>,
     config: Res<Config>,
+    render_device: Option<Res<RenderDevice>>,
 ) {
+    let max_texture_size = match render_device {
+        Some(device) => device.limits().max_texture_dimension_2d,
+        None => FALLBACK_MAX_TEXTURE_SIZE,
+    };
     for ev in load_evr.read() {
         let Some(f) = File::open(&ev.path).ok() else {
             println!("Failed to open file: {}", ev.path);
@@ -1401,7 +1413,7 @@ fn on_load_image(
         };
 
         let size = Vec2::new(image.width() as f32, image.height() as f32);
-        let tile_rects = tile_grid(image.width(), image.height(), MAX_TEXTURE_SIZE);
+        let tile_rects = tile_grid(image.width(), image.height(), max_texture_size);
         // A single tile takes the decoded buffer as is; larger images are copied tile by tile
         let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
             vec![(tile_rects[0], image)]
@@ -1869,7 +1881,7 @@ fn change_global_rotation(
 ) {
     if keys.just_pressed(config.shortcut.rotate_images) {
         global_rotation.0 += 1;
-    move_image_evw.write(MoveImageEvent);
+        move_image_evw.write(MoveImageEvent);
     };
 }
 
@@ -1931,11 +1943,7 @@ fn change_rotation_individually(
             return;
         };
 
-        let rotate_turn = if buttons.just_pressed(MouseButton::Left) {
-            1
-        } else {
-            -1
-        };
+        let rotate_turn = if buttons.just_pressed(MouseButton::Left) { 1 } else { -1 };
 
         for (id, mut rotate) in &mut sprite_query {
             let (cell_offset, cell_size) =
@@ -2146,10 +2154,7 @@ fn reset_scales(
     }
 }
 
-fn on_image_spawned(
-    mut fit_to_screen_evw: MessageWriter<FitToScreen>,
-    sprite_query: Query<&Id, Added<MyImage>>,
-) {
+fn on_image_spawned(mut fit_to_screen_evw: MessageWriter<FitToScreen>, sprite_query: Query<&Id, Added<MyImage>>) {
     if sprite_query.iter().count() == 0 {
         return;
     }
@@ -2326,7 +2331,7 @@ fn save_cropped(
 
 fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config: Res<Config>) {
     for _ev in save_settings_evr.read() {
-        let Some(home_directory) = home::home_dir() else {
+        let Some(home_directory) = home_dir() else {
             println!("User directory not found");
             return;
         };
@@ -2853,12 +2858,20 @@ fn ui_review_panel(
                     ui.separator();
                 }
 
-                if ui.button("\u{1F4E4}").on_hover_text("Reload directory with current regexes").clicked() {
+                if ui
+                    .button("\u{1F4E4}")
+                    .on_hover_text("Reload directory with current regexes")
+                    .clicked()
+                {
                     refresh_evw.write(RefreshReviewEvent);
                 }
             }
 
-            if ui.button("\u{21BB}").on_hover_text("Recompute patterns from open images").clicked() {
+            if ui
+                .button("\u{21BB}")
+                .on_hover_text("Recompute patterns from open images")
+                .clicked()
+            {
                 activate_evw.write(ActivateReviewEvent);
             }
         });
