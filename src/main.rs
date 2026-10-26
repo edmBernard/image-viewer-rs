@@ -2493,7 +2493,13 @@ fn file_drop(
     for ev in dnd_evr.read() {
         if let FileDragAndDrop::DroppedFile { path_buf, .. } = ev {
             some_file_dropped = true;
-            let Some(image_absolute) = path_buf.as_path().to_str() else {
+            // On Windows, explorer hands us 8.3 short names (FOO~1.PNG) when the full path
+            // exceeds MAX_PATH. Canonicalizing resolves them back to the real long names.
+            let Ok(resolved_path) = canonicalize(path_buf) else {
+                println!("Can't resolve given path: {:?}", path_buf);
+                continue;
+            };
+            let Some(image_absolute) = resolved_path.as_path().to_str() else {
                 println!("Can't resolve given path: {:?}", path_buf);
                 continue;
             };
