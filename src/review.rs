@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;
@@ -139,107 +140,78 @@ fn pattern_directory<'a>(default_directory: &'a Path, cell_pattern: &'a CellPatt
     }
 }
 
-// Flat read_dir, match each filename against all cell regexes, collect unique radixes (sorted).
-// Only keeps radixes that match at least 2 different cell patterns to filter out false positives
-// from broad regexes (e.g. "^(.*)\.jpg$" matching every .jpg file).
-pub fn scan_radixes(directory: &Path, cell_patterns: &[CellPattern]) -> Vec<String> {
-    // Compile all regexes upfront, skipping invalid ones
-    let compiled: Vec<Option<Regex>> = cell_patterns
-        .iter()
-        .map(|cp| match Regex::new(&cp.regex_str) {
-            Ok(re) => Some(re),
-            Err(e) => {
-                println!("Invalid regex '{}': {}", cp.regex_str, e);
-                None
-            }
-        })
-        .collect();
-
-    // Track which cell indices each radix matches
-    let mut radix_cells: HashMap<String, BTreeSet<usize>> = HashMap::new();
-    let mut patterns_by_directory: HashMap<String, Vec<usize>> = HashMap::new();
-
+// Flat read_dir of each cell's directory (each directory read once), matching every filename
+// against the cell regexes. Calls `on_match(cell_idx, radix, directory, filename)` for each hit.
+// Invalid regexes are reported and skipped.
+fn for_each_match(
+    default_directory: &Path,
+    cell_patterns: &[CellPattern],
+    mut on_match: impl FnMut(usize, &str, &Path, &str),
+) {
+    let mut patterns_by_directory: HashMap<&Path, Vec<(usize, Regex)>> = HashMap::new();
     for (cell_idx, cell_pattern) in cell_patterns.iter().enumerate() {
-        if compiled[cell_idx].is_none() {
-            continue;
-        }
-        let directory = pattern_directory(directory, cell_pattern).to_string_lossy().to_string();
-        patterns_by_directory.entry(directory).or_default().push(cell_idx);
+        let re = match Regex::new(&cell_pattern.regex_str) {
+            Ok(re) => re,
+            Err(e) => {
+                println!("Invalid regex '{}': {}", cell_pattern.regex_str, e);
+                continue;
+            }
+        };
+        let directory = pattern_directory(default_directory, cell_pattern);
+        patterns_by_directory.entry(directory).or_default().push((cell_idx, re));
     }
 
-    for (directory, cell_indices) in patterns_by_directory {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
+    for (directory, cells) in patterns_by_directory {
+        let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
         for entry in entries {
             let Ok(entry) = entry else { continue };
-            let Some(name) = entry.file_name().to_str().map(String::from) else {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
                 continue;
             };
-            for &cell_idx in &cell_indices {
-                let Some(re) = &compiled[cell_idx] else { continue };
-                if let Some(caps) = re.captures(&name) {
-                    if let Some(m) = caps.get(1) {
-                        radix_cells.entry(m.as_str().to_string()).or_default().insert(cell_idx);
-                    }
-                }
+            for (cell_idx, re) in &cells {
+                let Some(radix) = re.captures(name).and_then(|caps| caps.get(1)) else {
+                    continue;
+                };
+                on_match(*cell_idx, radix.as_str(), directory, name);
             }
         }
     }
+}
+
+// Collect unique radixes (sorted).
+// Only keeps radixes that match at least 2 different cell patterns to filter out false positives
+// from broad regexes (e.g. "^(.*)\.jpg$" matching every .jpg file).
+pub fn scan_radixes(directory: &Path, cell_patterns: &[CellPattern]) -> Vec<String> {
+    // Track which cell indices each radix matches
+    let mut radix_cells: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for_each_match(directory, cell_patterns, |cell_idx, radix, _, _| {
+        radix_cells.entry(radix.to_string()).or_default().insert(cell_idx);
+    });
 
     // Only keep radixes matching at least 2 cells (or all cells if there's only 1 pattern)
     let min_cells = cell_patterns.len().min(2);
-    radix_cells
-        .into_iter()
-        .filter(|(_, cells)| cells.len() >= min_cells)
-        .map(|(radix, _)| radix)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    let mut radixes = Vec::new();
+    for (radix, cells) in radix_cells {
+        if cells.len() >= min_cells {
+            radixes.push(radix);
+        }
+    }
+    radixes
 }
 
 // For a given radix, find the matching file for each cell by applying the regex against
 // directory entries. This works even when the user has manually edited the regex patterns.
 // Returns None for cells where no matching file is found.
 pub fn resolve_files_for_radix(directory: &Path, radix: &str, cell_patterns: &[CellPattern]) -> Vec<Option<String>> {
-    let compiled: Vec<Option<Regex>> = cell_patterns.iter().map(|cp| Regex::new(&cp.regex_str).ok()).collect();
-
     let mut result: Vec<Option<String>> = vec![None; cell_patterns.len()];
-    let mut patterns_by_directory: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for (cell_idx, cell_pattern) in cell_patterns.iter().enumerate() {
-        if compiled[cell_idx].is_none() {
-            continue;
+    for_each_match(directory, cell_patterns, |cell_idx, matched_radix, dir, name| {
+        if matched_radix == radix && result[cell_idx].is_none() {
+            result[cell_idx] = Some(dir.join(name).to_string_lossy().to_string());
         }
-        let directory = pattern_directory(directory, cell_pattern).to_string_lossy().to_string();
-        patterns_by_directory.entry(directory).or_default().push(cell_idx);
-    }
-
-    for (directory, cell_indices) in patterns_by_directory {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let Some(name) = entry.file_name().to_str().map(String::from) else {
-                continue;
-            };
-            for &i in &cell_indices {
-                if result[i].is_some() {
-                    continue;
-                }
-                let Some(re) = &compiled[i] else { continue };
-                if let Some(caps) = re.captures(&name) {
-                    if let Some(m) = caps.get(1) {
-                        if m.as_str() == radix {
-                            result[i] = Some(Path::new(&directory).join(&name).to_string_lossy().to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    });
     result
 }
 

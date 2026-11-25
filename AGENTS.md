@@ -46,7 +46,7 @@ Imports -> Type alias -> CLI args (clap) -> Constants -> App states -> Enums -> 
 Systems communicate via buffered events (`MessageWriter<T>` / `MessageReader<T>`), not direct calls. Signal events (no payload) use `is_empty()` / `clear()` pattern; data events iterate with `for ev in reader.read()`.
 
 Key event chains:
-- **Image loading**: `LoadNewImageEvent` -> `on_load_image()` decodes image -> `NewImageLoadedEvent` -> `on_image_loaded()` spawns entities -> `on_image_spawned()` triggers `FitToScreen`
+- **Image loading**: `LoadImagesEvent { paths, replace }` -> `on_load_image()` decodes images -> `NewImageLoadedEvent` (first one flagged `replace` for a replacing batch) -> `on_image_loaded()` spawns entities -> `on_image_spawned()` triggers `FitToScreen`
 - **Layout**: `MoveImageEvent` triggers position/crop recalculation for all images
 - **Review navigation**: `NavigateReviewEvent` -> loads new image set; `ActivateReviewEvent` -> extracts patterns from current images; `RefreshReviewEvent` -> rescans directory with edited regexes
 - **Image management**: the `ImageList` resource holds image entities in display order; an image's index in it is its cell. Labels and cursors point to their image with `ImageOf(Entity)`. `RemoveImageEvent(Entity)` despawns the image and its label/cursor; reordering moves the entry in `ImageList` and sends `MoveImageEvent`

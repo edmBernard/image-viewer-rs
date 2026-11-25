@@ -9,7 +9,6 @@ use std::fs::canonicalize;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,7 +23,7 @@ use bevy::window::{PresentMode, WindowResized, WindowResolution};
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
-use image::{ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, Pixel, SubImage};
+use image::{ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, Pixel};
 use moxcms::{CmsError, ColorProfile, DataColorSpace, Layout, TransformExecutor, TransformOptions};
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +75,15 @@ enum ScrollBehavior {
 enum SamplerMode {
     Nearest,
     Bilinear,
+}
+
+impl SamplerMode {
+    fn sampler(&self) -> ImageSampler {
+        match self {
+            SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
+            SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
+        }
+    }
 }
 
 // Color space the physical screen works in. Decoded images are converted from
@@ -183,19 +191,11 @@ fn main() -> Result<()> {
     let images_filename = check_all_images_exist(&args.images)?;
 
     let user_config_data = 'block: {
-        let Some(home_directory) = home_dir() else {
-            println!("User directory not found");
+        let Some(config_path) = config_path() else {
             break 'block None;
         };
-        println!("User Directory Found: {}", home_directory.display());
-        let config_filename = ".image_viewer";
-        println!("{}", home_directory.join(config_filename).display());
-
-        let Some(config_str) = std::fs::read_to_string(home_directory.join(config_filename)).ok() else {
-            println!(
-                "Config File not found: {}",
-                home_directory.join(config_filename).display()
-            );
+        let Some(config_str) = std::fs::read_to_string(&config_path).ok() else {
+            println!("Config File not found: {}", config_path.display());
             break 'block None;
         };
 
@@ -256,7 +256,6 @@ fn main() -> Result<()> {
         .insert_resource(config_data)
         .insert_resource(GlobalScale(1. / 8.))
         .insert_resource(GlobalRotation(0))
-        .insert_resource(NewImageBatch(true))
         .insert_resource(AddMode(false))
         .insert_resource(MultiCursorEnabled(false))
         .insert_resource(RecordedPressedKey(None))
@@ -274,7 +273,7 @@ fn main() -> Result<()> {
         .insert_resource(ReviewState::default())
         .insert_resource(PreservedView::default())
         .add_systems(Startup, setup)
-        .add_message::<LoadNewImageEvent>()
+        .add_message::<LoadImagesEvent>()
         .add_message::<NewImageLoadedEvent>()
         .add_message::<MoveImageEvent>()
         .add_message::<SaveCropped>()
@@ -585,9 +584,6 @@ struct GlobalScale(f32);
 struct GlobalRotation(i32);
 
 #[derive(Resource)]
-struct NewImageBatch(bool);
-
-#[derive(Resource)]
 struct AddMode(bool);
 
 #[derive(Resource)]
@@ -643,6 +639,19 @@ impl Default for ReviewState {
             error: None,
             drag_switch: true,
         }
+    }
+}
+
+impl ReviewState {
+    // Replace the open images with the files of the set identified by `radix`
+    fn load_set(&self, radix: &str) -> LoadImagesEvent {
+        let directory = PathBuf::from(&self.directory);
+        let mut paths = Vec::new();
+        for file in review::resolve_files_for_radix(&directory, radix, &self.cell_patterns) {
+            let Some(path) = file else { continue };
+            paths.push(path);
+        }
+        LoadImagesEvent { paths, replace: true }
     }
 }
 
@@ -728,17 +737,22 @@ struct ImageTile {
     rect: Rect,
 }
 
-// Loaded images are appended to ImageList in the order their events are read
+// Loaded images are appended to ImageList in the order their events are read.
+// `replace` is set on the first image of a replacing batch: the current images are dropped before it's added.
 #[derive(Message)]
 struct NewImageLoadedEvent {
     tiles: Vec<ImageTile>,
     size: Vec2,
     path: String,
+    replace: bool,
 }
 
+// Load a batch of images, either replacing the current ones or appended after them (add mode).
+// A replacing batch where nothing decodes leaves the current images untouched.
 #[derive(Message)]
-struct LoadNewImageEvent {
-    path: String,
+struct LoadImagesEvent {
+    paths: Vec<String>,
+    replace: bool,
 }
 
 #[derive(Message)]
@@ -767,7 +781,7 @@ fn setup(
     mut commands: Commands,
     images_filename: ResMut<InitialImagesFilename>,
     config: Res<Config>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
     mut fonts: ResMut<Assets<Font>>,
 ) {
     let mut camera = commands.spawn(Camera2d);
@@ -801,9 +815,10 @@ fn setup(
         MyHelp,
     ));
 
-    for image in &images_filename.0 {
-        load_image_evw.write(LoadNewImageEvent { path: image.clone() });
-    }
+    load_image_evw.write(LoadImagesEvent {
+        paths: images_filename.0.clone(),
+        replace: true,
+    });
 }
 
 fn configure_visuals(mut egui_ctx: EguiContexts) {
@@ -1267,8 +1282,38 @@ fn on_remove_image(
     }
 }
 
+// Decode an image from disk and convert it from its own color space to `target`
+fn decode_image(path: &str, target: ScreenColorSpace) -> Option<DynamicImage> {
+    let Some(f) = File::open(path).ok() else {
+        println!("Failed to open file: {}", path);
+        return None;
+    };
+    let Some(format) = ImageFormat::from_path(path).ok() else {
+        println!("Failed to deduce image format from path: {}", path);
+        return None;
+    };
+
+    let mut reader = image::ImageReader::with_format(BufReader::new(f), format);
+
+    // Remove the memory limit on image size we can read
+    // This is required to process large images that would otherwise be rejected by the image crate
+    reader.no_limits();
+
+    let Some(mut decoder) = reader.into_decoder().ok() else {
+        println!("Failed to decode image: {}", path);
+        return None;
+    };
+    let icc_profile = decoder.icc_profile().ok().flatten();
+    let Some(image) = DynamicImage::from_decoder(decoder).ok() else {
+        println!("Failed to decode image: {}", path);
+        return None;
+    };
+    let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
+    Some(convert_to_screen_space(image, icc, target, path))
+}
+
 fn on_load_image(
-    mut load_evr: MessageReader<LoadNewImageEvent>,
+    mut load_evr: MessageReader<LoadImagesEvent>,
     mut loaded_evw: MessageWriter<NewImageLoadedEvent>,
     mut images: ResMut<Assets<Image>>,
     config: Res<Config>,
@@ -1278,71 +1323,49 @@ fn on_load_image(
         Some(device) => device.limits().max_texture_dimension_2d,
         None => FALLBACK_MAX_TEXTURE_SIZE,
     };
+    let sampler = config.misc.sampler_mode.sampler();
     for ev in load_evr.read() {
-        let Some(f) = File::open(&ev.path).ok() else {
-            println!("Failed to open file: {}", ev.path);
-            continue;
-        };
-        let Some(format) = ImageFormat::from_path(&ev.path).ok() else {
-            println!("Failed to deduce image format from path: {}", ev.path);
-            continue;
-        };
-
-        let buf = BufReader::new(f);
-        let mut reader = image::ImageReader::with_format(buf, format);
-
-        // Remove the memory limit on image size we can read
-        // This is required to process large images that would otherwise be rejected by the image crate
-        reader.no_limits();
-
-        let Some(mut decoder) = reader.into_decoder().ok() else {
-            println!("Failed to decode image: {}", ev.path);
-            continue;
-        };
-        let icc_profile = decoder.icc_profile().ok().flatten();
-        let Some(image) = DynamicImage::from_decoder(decoder).ok() else {
-            println!("Failed to decode image: {}", ev.path);
-            continue;
-        };
-        let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
-        let image = convert_to_screen_space(image, icc, config.color.screen_color_space, &ev.path);
-
-        let sampler = match config.misc.sampler_mode {
-            SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
-            SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
-        };
-
-        let size = Vec2::new(image.width() as f32, image.height() as f32);
-        let tile_rects = tile_grid(image.width(), image.height(), max_texture_size);
-        // A single tile takes the decoded buffer as is; larger images are copied tile by tile
-        let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
-            vec![(tile_rects[0], image)]
-        } else {
-            tile_rects
-                .into_iter()
-                .map(|r| (r, image.crop_imm(r.min.x, r.min.y, r.width(), r.height())))
-                .collect()
-        };
-
-        let mut tiles = Vec::with_capacity(tile_images.len());
-        for (rect, tile_image) in tile_images {
-            let Some(mut texture) = to_texture(tile_image) else {
-                break;
+        // Only the first image that actually loads replaces the current batch
+        let mut replace = ev.replace;
+        for path in &ev.paths {
+            let Some(image) = decode_image(path, config.color.screen_color_space) else {
+                continue;
             };
-            texture.sampler = sampler.clone();
-            tiles.push(ImageTile {
-                handle: images.add(texture),
-                rect: rect.as_rect(),
+
+            let size = Vec2::new(image.width() as f32, image.height() as f32);
+            let tile_rects = tile_grid(image.width(), image.height(), max_texture_size);
+            // A single tile takes the decoded buffer as is; larger images are copied tile by tile
+            let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
+                vec![(tile_rects[0], image)]
+            } else {
+                tile_rects
+                    .into_iter()
+                    .map(|r| (r, image.crop_imm(r.min.x, r.min.y, r.width(), r.height())))
+                    .collect()
+            };
+
+            let mut tiles = Vec::with_capacity(tile_images.len());
+            for (rect, tile_image) in tile_images {
+                let Some(mut texture) = to_texture(tile_image) else {
+                    break;
+                };
+                texture.sampler = sampler.clone();
+                tiles.push(ImageTile {
+                    handle: images.add(texture),
+                    rect: rect.as_rect(),
+                });
+            }
+            if tiles.is_empty() {
+                continue;
+            }
+            loaded_evw.write(NewImageLoadedEvent {
+                tiles,
+                size,
+                path: path.clone(),
+                replace,
             });
+            replace = false;
         }
-        if tiles.is_empty() {
-            continue;
-        }
-        loaded_evw.write(NewImageLoadedEvent {
-            tiles,
-            size,
-            path: ev.path.clone(),
-        });
     }
 }
 
@@ -1388,23 +1411,29 @@ fn on_image_loaded(
     title_query: Query<Entity, With<MyText>>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
-    mut is_new_batch: ResMut<NewImageBatch>,
     mut image_list: ResMut<ImageList>,
 ) {
-    for ev in load_image_evr.read() {
-        let font = font_query.single().unwrap();
+    let events: Vec<&NewImageLoadedEvent> = load_image_evr.read().collect();
+    if events.is_empty() {
+        return;
+    }
+    let font = font_query.single().unwrap();
 
-        if is_new_batch.0 {
-            for &entity in &image_list.0 {
-                commands.entity(entity).despawn();
-            }
-            for entity in &title_query {
-                commands.entity(entity).despawn();
-            }
-            image_list.0.clear();
-            is_new_batch.0 = false;
+    // Everything before the last replacing image would be dropped anyway, so clear once and
+    // skip those (labels spawned earlier in this frame aren't visible to title_query yet)
+    let mut start = 0;
+    if let Some(last_replace) = events.iter().rposition(|ev| ev.replace) {
+        start = last_replace;
+        for &entity in &image_list.0 {
+            commands.entity(entity).despawn();
         }
+        for entity in &title_query {
+            commands.entity(entity).despawn();
+        }
+        image_list.0.clear();
+    }
 
+    for ev in &events[start..] {
         // Start hidden; on_move_image will make it visible after positioning.
         // The image entity carries the view state; each tile child carries one texture.
         let image_entity = commands
@@ -1456,10 +1485,10 @@ fn on_image_loaded(
         ));
 
         image_list.0.push(image_entity);
-
-        let mut help_visibility = help_query.single_mut().unwrap();
-        *help_visibility = Visibility::Hidden;
     }
+
+    let mut help_visibility = help_query.single_mut().unwrap();
+    *help_visibility = Visibility::Hidden;
 }
 
 fn on_move_image(
@@ -1800,38 +1829,21 @@ fn change_rotation_individually(
     image_list: Res<ImageList>,
     mut sprite_query: Query<&mut Rotation, With<MyImage>>,
 ) {
-    if keys.pressed(config.shortcut.local_rotate_modifier) {
-        if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
-            return;
-        }
-
-        let num_images = image_list.0.len();
-        let window = windows.single().unwrap();
-
-        let Some(cursor_position) = window.cursor_position() else {
-            return;
-        };
-
-        let rotate_turn = if buttons.just_pressed(MouseButton::Left) { 1 } else { -1 };
-
-        for (slot, &entity) in image_list.0.iter().enumerate() {
-            let (cell_offset, cell_size) =
-                get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-
-            if cursor_position.x > cell_offset.x
-                && cursor_position.x < cell_offset.x + cell_size.x
-                && cursor_position.y > cell_offset.y
-                && cursor_position.y < cell_offset.y + cell_size.y
-            {
-                if let Ok(mut rotate) = sprite_query.get_mut(entity) {
-                    rotate.0 += rotate_turn;
-                }
-                break;
-            }
-        }
-
-        move_image_evw.write(MoveImageEvent);
+    if !keys.pressed(config.shortcut.local_rotate_modifier) {
+        return;
     }
+    if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
+        return;
+    }
+    let window = windows.single().unwrap();
+    let Some(entity) = image_under_cursor(window, &image_list, &layout_state, config.misc.grid_width) else {
+        return;
+    };
+    let Ok(mut rotate) = sprite_query.get_mut(entity) else {
+        return;
+    };
+    rotate.0 += if buttons.just_pressed(MouseButton::Left) { 1 } else { -1 };
+    move_image_evw.write(MoveImageEvent);
 }
 
 fn change_zoom_individually(
@@ -1844,52 +1856,53 @@ fn change_zoom_individually(
     image_list: Res<ImageList>,
     mut sprite_query: Query<(&mut Scale, &mut Position), With<MyImage>>,
 ) {
-    if keys.pressed(config.shortcut.local_zoom_modifier) {
-        if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
-            return;
-        }
-
-        let num_images = image_list.0.len();
-        let window = windows.single().unwrap();
-
-        let Some(cursor_position) = window.cursor_position() else {
-            return;
-        };
-        let scale_factor = if buttons.just_pressed(MouseButton::Left) {
-            2.0f32
-        } else {
-            0.5f32
-        };
-
-        let position_normalized = 'outer: {
-            for (slot, &entity) in image_list.0.iter().enumerate() {
-                let (cell_offset, cell_size) =
-                    get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-
-                if cursor_position.x > cell_offset.x
-                    && cursor_position.x < cell_offset.x + cell_size.x
-                    && cursor_position.y > cell_offset.y
-                    && cursor_position.y < cell_offset.y + cell_size.y
-                {
-                    let Ok((mut scale, position)) = sprite_query.get_mut(entity) else {
-                        break 'outer None;
-                    };
-                    scale.0 *= scale_factor;
-                    break 'outer Some(position.0 * scale.0);
-                }
-            }
-            None
-        };
-
-        if let Some(pos) = position_normalized {
-            // Reset position for other images to match the one we zoom
-            for (scale, mut position) in &mut sprite_query {
-                position.0 = pos / scale.0;
-            }
-        }
-
-        move_image_evw.write(MoveImageEvent);
+    if !keys.pressed(config.shortcut.local_zoom_modifier) {
+        return;
     }
+    if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
+        return;
+    }
+    let window = windows.single().unwrap();
+    let Some(entity) = image_under_cursor(window, &image_list, &layout_state, config.misc.grid_width) else {
+        return;
+    };
+    let Ok((mut scale, position)) = sprite_query.get_mut(entity) else {
+        return;
+    };
+    scale.0 *= if buttons.just_pressed(MouseButton::Left) {
+        2.
+    } else {
+        0.5
+    };
+    let position_normalized = position.0 * scale.0;
+
+    // Reset position for other images to match the one we zoom
+    for (scale, mut position) in &mut sprite_query {
+        position.0 = position_normalized / scale.0;
+    }
+    move_image_evw.write(MoveImageEvent);
+}
+
+// Image whose cell is under the mouse cursor
+fn image_under_cursor(
+    window: &Window,
+    image_list: &ImageList,
+    layout_state: &GridLayoutState,
+    grid_width: i32,
+) -> Option<Entity> {
+    let cursor_position = window.cursor_position()?;
+    // Stacked cells all cover the window, only the selected one is visible
+    if layout_state.layout == GridLayout::Stack {
+        return image_list.0.get(layout_state.index).copied();
+    }
+    let num_images = image_list.0.len();
+    for (slot, &entity) in image_list.0.iter().enumerate() {
+        let (cell_offset, cell_size) = get_cell_rect(slot, num_images, &layout_state.layout, window, grid_width);
+        if Rect::from_corners(cell_offset, cell_offset + cell_size).contains(cursor_position) {
+            return Some(entity);
+        }
+    }
+    None
 }
 
 fn get_cell_rect(
@@ -2145,91 +2158,39 @@ fn save_cropped(
 ) {
     for _ev in save_cropped_evr.read() {
         for (path, view_rect) in &image_query {
-            // Get Input image
-            let input_path = Path::new(&path.0);
-            let Some(f_in) = File::open(&input_path).ok() else {
-                println!("Failed to open file {}", path.0);
+            let Some(rect) = view_rect.0 else {
+                println!("Failed to get ROI of the texture: {}", path.0);
                 continue;
             };
-            let buf_in = BufReader::new(f_in);
-            let Some(format) = ImageFormat::from_path(&input_path).ok() else {
-                println!("Failed to deduce image format from path : {}", path.0);
+            let Some(output_path) = insert_suffix(Path::new(&path.0), "_crop") else {
+                println!("Failed to create output filename: {}", path.0);
                 continue;
             };
 
-            let mut reader = image::ImageReader::with_format(buf_in, format);
-
-            // Remove the memory limit on image size we can read
-            // This is required to process large images that would otherwise be rejected by the image crate
-            reader.no_limits();
-
-            let Some(mut decoder) = reader.into_decoder().ok() else {
-                println!("Failed to decode image");
-                continue;
-            };
-            let icc_profile = decoder.icc_profile().ok().flatten();
-            let Some(image) = DynamicImage::from_decoder(decoder).ok() else {
-                println!("Failed to decode image");
-                continue;
-            };
             // The crop is saved without a profile and may be opened anywhere,
             // so it is always converted to sRGB, not to the screen color space.
-            let icc = icc_profile.as_deref().filter(|icc| !icc.is_empty());
-            let image = convert_to_screen_space(image, icc, ScreenColorSpace::Srgb, &path.0);
-            // reader don't preserve the input format and append an alpha channel
-            let image_rgb8 = image.to_rgb8();
-
-            // Get Output buffer
-            let Some(output_path) = insert_suffix(input_path, "_crop") else {
-                println!("Failed to create output filename");
+            let Some(image) = decode_image(&path.0, ScreenColorSpace::Srgb) else {
                 continue;
             };
+            let size = rect.size();
+            let crop = image.crop_imm(rect.min.x as u32, rect.min.y as u32, size.x as u32, size.y as u32);
 
-            let Some(f_out) = File::create(&output_path).ok() else {
-                println!("Failed to create file {}", &output_path.display());
-                continue;
-            };
-            let mut buf_out = BufWriter::new(f_out);
-
-            // Get Roi from the current view
-            let Some(rect) = view_rect.0 else {
-                println!("Failed to get ROI of the texture");
-                continue;
-            };
-
-            let size = rect.max - rect.min;
-            let image_view = SubImage::new(
-                &image_rgb8,
-                rect.min.x as u32,
-                rect.min.y as u32,
-                size.x as u32,
-                size.y as u32,
-            );
-
-            let subimage = image_view.to_image();
-
-            // Saved in the input format so the content matches the extension kept by insert_suffix
-            if let Err(e) = subimage.write_to(&mut buf_out, format) {
-                println!("Failed to write data to file {}: {}", &output_path.display(), e);
-                continue;
-            };
+            // RGB8 is the one layout every encoder takes (JPEG has no alpha or 16 bits).
+            // The format follows the extension, the same as the input.
+            if let Err(e) = crop.to_rgb8().save(&output_path) {
+                println!("Failed to write data to file {}: {}", output_path.display(), e);
+            }
         }
     }
 }
 
 fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config: Res<Config>) {
     for _ev in save_settings_evr.read() {
-        let Some(home_directory) = home_dir() else {
-            println!("User directory not found");
+        let Some(dst_path) = config_path() else {
             return;
         };
-        println!("User Directory Found: {}", home_directory.display());
-        let config_filename = ".image_viewer";
-        println!("{}", home_directory.join(config_filename).display());
-        let dst_path = home_directory.join(config_filename);
-
-        let Ok(mut file) = File::create(dst_path) else {
-            println!("Failed to create config file");
+        let Ok(mut file) = File::create(&dst_path) else {
+            println!("Failed to create config file: {}", dst_path.display());
             return;
         };
 
@@ -2255,10 +2216,7 @@ fn change_sampler(
     }
     change_sampler_evr.clear();
 
-    let new_sampler = match config.misc.sampler_mode {
-        SamplerMode::Nearest => ImageSampler::Descriptor(ImageSamplerDescriptor::nearest()),
-        SamplerMode::Bilinear => ImageSampler::Descriptor(ImageSamplerDescriptor::linear()),
-    };
+    let new_sampler = config.misc.sampler_mode.sampler();
 
     for sprite in &sprite_query {
         let Some(mut image) = images.get_mut(&sprite.image) else {
@@ -2363,21 +2321,14 @@ fn cursor_move(
 
 fn file_drop(
     mut dnd_evr: MessageReader<FileDragAndDrop>,
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
     add_mode: Res<AddMode>,
     review_state: Res<ReviewState>,
     mut switch_review_evw: MessageWriter<SwitchReviewToFileEvent>,
 ) {
-    if dnd_evr.is_empty() {
-        return;
-    }
     let mut images_filename = Vec::new();
-
-    let mut some_file_dropped = false;
     for ev in dnd_evr.read() {
         if let FileDragAndDrop::DroppedFile { path_buf, .. } = ev {
-            some_file_dropped = true;
             // On Windows, explorer hands us 8.3 short names (FOO~1.PNG) when the full path
             // exceeds MAX_PATH. Canonicalizing resolves them back to the real long names.
             let Ok(resolved_path) = canonicalize(path_buf) else {
@@ -2391,6 +2342,9 @@ fn file_drop(
             images_filename.push(String::from(image_absolute));
         }
     }
+    if images_filename.is_empty() {
+        return;
+    }
 
     // In review drag-to-switch mode, a dropped image jumps to the set it belongs to
     // rather than replacing the current batch. Only the first dropped file is used.
@@ -2401,15 +2355,11 @@ fn file_drop(
         return;
     }
 
-    if some_file_dropped {
-        // In add mode the new images are appended after the current ones
-        if !add_mode.0 {
-            is_new_batch.0 = true;
-        }
-        for filename in images_filename {
-            load_image_evw.write(LoadNewImageEvent { path: filename });
-        }
-    }
+    // In add mode the new images are appended after the current ones
+    load_image_evw.write(LoadImagesEvent {
+        paths: images_filename,
+        replace: !add_mode.0,
+    });
 }
 
 fn bound(vec: Vec2, rect: Rect) -> Vec2 {
@@ -2482,8 +2432,7 @@ mod macos_dock_drop {
 // time, so the pixels already uploaded are in the previous space.
 fn on_reload_images(
     mut reload_evr: MessageReader<ReloadImagesEvent>,
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
     image_list: Res<ImageList>,
@@ -2500,36 +2449,27 @@ fn on_reload_images(
     }
 
     capture_view(&mut preserved, global_scale.0, &image_list, &view_query);
-    is_new_batch.0 = true;
+    let mut paths = Vec::new();
     for &entity in &image_list.0 {
         let Ok(path) = path_query.get(entity) else {
             continue;
         };
-        load_image_evw.write(LoadNewImageEvent { path: path.0.clone() });
+        paths.push(path.0.clone());
     }
+    load_image_evw.write(LoadImagesEvent { paths, replace: true });
 }
 
-fn poll_dock_drop_queue(
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
-    add_mode: Res<AddMode>,
-) {
+fn poll_dock_drop_queue(mut load_image_evw: MessageWriter<LoadImagesEvent>, add_mode: Res<AddMode>) {
     let Ok(mut queue) = DOCK_DROP_QUEUE.lock() else {
         return;
     };
     if queue.is_empty() {
         return;
     }
-
-    let paths: Vec<String> = queue.drain(..).collect();
-    drop(queue);
-
-    if !add_mode.0 {
-        is_new_batch.0 = true;
-    }
-    for path in paths {
-        load_image_evw.write(LoadNewImageEvent { path });
-    }
+    load_image_evw.write(LoadImagesEvent {
+        paths: queue.drain(..).collect(),
+        replace: !add_mode.0,
+    });
 }
 
 // MARK: Review Mode
@@ -2556,8 +2496,7 @@ fn capture_view(
 fn on_navigate_review(
     mut navigate_evr: MessageReader<NavigateReviewEvent>,
     mut review_state: ResMut<ReviewState>,
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
     image_list: Res<ImageList>,
@@ -2571,24 +2510,14 @@ fn on_navigate_review(
         let count = review_state.radixes.len() as i32;
         let new_index = (review_state.current_index as i32 + ev.0).rem_euclid(count) as usize;
         review_state.current_index = new_index;
-
-        let radix = &review_state.radixes[new_index];
-        let directory = PathBuf::from(&review_state.directory);
-        let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
-
-        is_new_batch.0 = true;
-        for file in files {
-            let Some(path) = file else { continue };
-            load_image_evw.write(LoadNewImageEvent { path });
-        }
+        load_image_evw.write(review_state.load_set(&review_state.radixes[new_index]));
     }
 }
 
 fn on_switch_review_to_file(
     mut switch_evr: MessageReader<SwitchReviewToFileEvent>,
     mut review_state: ResMut<ReviewState>,
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
     image_list: Res<ImageList>,
@@ -2613,15 +2542,8 @@ fn on_switch_review_to_file(
             review_state.current_index = index;
         }
 
-        let directory = PathBuf::from(&review_state.directory);
-        let files = review::resolve_files_for_radix(&directory, &radix, &review_state.cell_patterns);
-
         review_state.error = None;
-        is_new_batch.0 = true;
-        for file in files {
-            let Some(path) = file else { continue };
-            load_image_evw.write(LoadNewImageEvent { path });
-        }
+        load_image_evw.write(review_state.load_set(&radix));
     }
 }
 
@@ -2674,8 +2596,7 @@ fn on_activate_review(
 fn on_refresh_review(
     mut refresh_evr: MessageReader<RefreshReviewEvent>,
     mut review_state: ResMut<ReviewState>,
-    mut is_new_batch: ResMut<NewImageBatch>,
-    mut load_image_evw: MessageWriter<LoadNewImageEvent>,
+    mut load_image_evw: MessageWriter<LoadImagesEvent>,
 ) {
     for _ev in refresh_evr.read() {
         // Rebuild cell_patterns from editable_patterns
@@ -2700,12 +2621,7 @@ fn on_refresh_review(
 
         // Reload images for the current radix
         if let Some(radix) = review_state.radixes.get(review_state.current_index) {
-            let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
-            is_new_batch.0 = true;
-            for file in files {
-                let Some(path) = file else { continue };
-                load_image_evw.write(LoadNewImageEvent { path });
-            }
+            load_image_evw.write(review_state.load_set(radix));
         }
     }
 }
@@ -2797,6 +2713,17 @@ fn check_all_images_exist(images: &[String]) -> Result<Vec<String>> {
         images_absolute.push(String::from(image_absolute));
     }
     Ok(images_absolute)
+}
+
+// User config file, ~/.image_viewer
+fn config_path() -> Option<PathBuf> {
+    let Some(home_directory) = home_dir() else {
+        println!("User directory not found");
+        return None;
+    };
+    let config_path = home_directory.join(".image_viewer");
+    println!("Config path: {}", config_path.display());
+    Some(config_path)
 }
 
 fn get_short_name(path: &str) -> Option<&str> {
