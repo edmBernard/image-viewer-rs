@@ -6,15 +6,41 @@ use std::path::Path;
 use regex::Regex;
 
 // A cell's pattern: where to search, the full tail after radix, and regex.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CellPattern {
     pub directory: String,
     pub tail: String,
     pub regex_str: String,
+    // regex_str compiled once; None when invalid, the cell then matches nothing
+    regex: Option<Regex>,
+}
+
+impl CellPattern {
+    pub fn new(directory: String, tail: String, regex_str: String) -> Self {
+        let regex = match Regex::new(&regex_str) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                println!("Invalid regex '{}': {}", regex_str, e);
+                None
+            }
+        };
+        CellPattern {
+            directory,
+            tail,
+            regex_str,
+            regex,
+        }
+    }
+
+    // The radix captured from `filename`, if it matches this cell
+    fn capture_radix<'a>(&self, filename: &'a str) -> Option<&'a str> {
+        let caps = self.regex.as_ref()?.captures(filename)?;
+        Some(caps.get(1)?.as_str())
+    }
 }
 
 // Result of analyzing a batch of filenames.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ExtractionResult {
     pub radix: String,
     pub cell_patterns: Vec<CellPattern>,
@@ -110,11 +136,7 @@ fn extract_patterns_from_inputs(inputs: &[InputPattern]) -> Option<ExtractionRes
         let f = input.filename;
         let tail = &f[radix.len()..];
         let regex_str = format!("^(.*){}$", regex::escape(tail));
-        cell_patterns.push(CellPattern {
-            directory: input.directory.clone(),
-            tail: tail.to_string(),
-            regex_str,
-        });
+        cell_patterns.push(CellPattern::new(input.directory.clone(), tail.to_string(), regex_str));
     }
 
     // Verify cells are distinct. Identical tails are allowed when the source directories differ.
@@ -142,23 +164,19 @@ fn pattern_directory<'a>(default_directory: &'a Path, cell_pattern: &'a CellPatt
 
 // Flat read_dir of each cell's directory (each directory read once), matching every filename
 // against the cell regexes. Calls `on_match(cell_idx, radix, directory, filename)` for each hit.
-// Invalid regexes are reported and skipped.
+// Cells with an invalid regex are skipped.
 fn for_each_match(
     default_directory: &Path,
     cell_patterns: &[CellPattern],
     mut on_match: impl FnMut(usize, &str, &Path, &str),
 ) {
-    let mut patterns_by_directory: HashMap<&Path, Vec<(usize, Regex)>> = HashMap::new();
+    let mut patterns_by_directory: HashMap<&Path, Vec<usize>> = HashMap::new();
     for (cell_idx, cell_pattern) in cell_patterns.iter().enumerate() {
-        let re = match Regex::new(&cell_pattern.regex_str) {
-            Ok(re) => re,
-            Err(e) => {
-                println!("Invalid regex '{}': {}", cell_pattern.regex_str, e);
-                continue;
-            }
-        };
+        if cell_pattern.regex.is_none() {
+            continue;
+        }
         let directory = pattern_directory(default_directory, cell_pattern);
-        patterns_by_directory.entry(directory).or_default().push((cell_idx, re));
+        patterns_by_directory.entry(directory).or_default().push(cell_idx);
     }
 
     for (directory, cells) in patterns_by_directory {
@@ -171,11 +189,11 @@ fn for_each_match(
             let Some(name) = file_name.to_str() else {
                 continue;
             };
-            for (cell_idx, re) in &cells {
-                let Some(radix) = re.captures(name).and_then(|caps| caps.get(1)) else {
+            for &cell_idx in &cells {
+                let Some(radix) = cell_patterns[cell_idx].capture_radix(name) else {
                     continue;
                 };
-                on_match(*cell_idx, radix.as_str(), directory, name);
+                on_match(cell_idx, radix, directory, name);
             }
         }
     }
@@ -220,13 +238,8 @@ pub fn resolve_files_for_radix(directory: &Path, radix: &str, cell_patterns: &[C
 // Used by drag-to-switch mode to jump to the set a dropped image belongs to.
 pub fn match_radix(filename: &str, cell_patterns: &[CellPattern]) -> Option<String> {
     for cell_pattern in cell_patterns {
-        let Ok(re) = Regex::new(&cell_pattern.regex_str) else {
-            continue;
-        };
-        if let Some(caps) = re.captures(filename) {
-            if let Some(m) = caps.get(1) {
-                return Some(m.as_str().to_string());
-            }
+        if let Some(radix) = cell_pattern.capture_radix(filename) {
+            return Some(radix.to_string());
         }
     }
     None

@@ -890,6 +890,7 @@ fn ui_bottom_menu(
     mut review_state: ResMut<ReviewState>,
     mut activate_evw: MessageWriter<ActivateReviewEvent>,
     mut panel_area: ResMut<UiPanelArea>,
+    image_list: Res<ImageList>,
 ) {
     if ui_state.visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -928,12 +929,15 @@ fn ui_bottom_menu(
                         fit_to_screen_evw.write(FitToScreen);
                     }
 
+                    // Always 10 buttons so the bar doesn't move; the ones without an image are disabled
                     for i in 0..10 {
                         let mut state = i == layout_state.index;
-                        if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
-                            layout_state.index = i;
-                            move_image_evw.write(MoveImageEvent);
-                        }
+                        ui.add_enabled_ui(i < image_list.0.len(), |ui| {
+                            if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
+                                layout_state.index = i;
+                                move_image_evw.write(MoveImageEvent);
+                            }
+                        });
                     }
 
                     ui.separator();
@@ -2484,11 +2488,7 @@ fn on_refresh_review(
             let old = review_state.cell_patterns.get(i);
             let directory = old.map(|cp| cp.directory.clone()).unwrap_or_default();
             let tail = old.map(|cp| cp.tail.clone()).unwrap_or_default();
-            new_patterns.push(review::CellPattern {
-                directory,
-                tail,
-                regex_str: regex_str.clone(),
-            });
+            new_patterns.push(review::CellPattern::new(directory, tail, regex_str.clone()));
         }
         review_state.cell_patterns = new_patterns;
 
