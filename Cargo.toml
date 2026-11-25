@@ -30,7 +30,7 @@ bevy = { version = "0.20", default-features = false, features = [
 	"jpeg",
 	"bmp",
 ] }
-bevy_egui = "0.43.0-rc.1"
+bevy_egui = "0.43.1"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
 use bevy::prelude::*;
+use bevy::winit::EventLoopProxy;
+use bevy::winit::EventLoopProxyWrapper;
+use bevy::winit::WinitUserEvent;
 
 use crate::{AddMode, LoadImagesEvent};
 
@@ -12,12 +15,24 @@ use crate::{AddMode, LoadImagesEvent};
 
 static DOCK_DROP_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+// The app only updates on input, so the ObjC handler wakes the event loop itself after queueing paths
+static EVENT_LOOP_PROXY: Mutex<Option<EventLoopProxy<WinitUserEvent>>> = Mutex::new(None);
+
+pub fn store_event_loop_proxy(proxy: Res<EventLoopProxyWrapper>) {
+    let Ok(mut stored) = EVENT_LOOP_PROXY.lock() else {
+        return;
+    };
+    *stored = Some((**proxy).clone());
+}
+
 #[cfg(target_os = "macos")]
 pub mod macos_dock_drop {
     use objc2::ffi;
     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
     use objc2::sel;
     use objc2_foundation::{NSArray, NSURL};
+
+    use bevy::winit::WinitUserEvent;
 
     // The handler that the ObjC runtime will call for application:openURLs:
     // Signature: void(id self, SEL _cmd, id application, id urls)
@@ -37,7 +52,19 @@ pub mod macos_dock_drop {
                 return;
             };
             queue.extend(paths);
+            drop(queue);
+            wake_event_loop();
         }
+    }
+
+    fn wake_event_loop() {
+        let Ok(stored) = super::EVENT_LOOP_PROXY.lock() else {
+            return;
+        };
+        let Some(proxy) = stored.as_ref() else {
+            return;
+        };
+        let _ = proxy.send_event(WinitUserEvent::WakeUp);
     }
 
     // Inject application:openURLs: into WinitApplicationDelegate at runtime.

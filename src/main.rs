@@ -20,13 +20,14 @@ use std::path::{Path, PathBuf};
 use bevy::camera::Hdr;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
-use bevy::window::{PresentMode, WindowResolution};
+use bevy::window::{PresentMode, RequestRedraw, WindowResolution};
+use bevy::winit::WinitSettings;
 use bevy_egui::{egui, EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 use moxcms::ColorProfile;
 use serde::{Deserialize, Serialize};
 
-use crate::dock_drop::poll_dock_drop_queue;
+use crate::dock_drop::{poll_dock_drop_queue, store_event_loop_proxy};
 use crate::input::{
     change_global_rotation, change_global_zoom, change_layout_on_click, change_rotation_individually, change_top_image,
     change_zoom_individually, cursor_move, file_drop, key_change_layout, key_save_cropped, key_toggle_add_mode,
@@ -278,6 +279,9 @@ fn main() -> Result<()> {
     dock_drop::macos_dock_drop::inject_open_urls_handler();
 
     app.insert_state(MyAppState::Working)
+        // Only update on input (or when something asks for a redraw) instead of spinning every frame.
+        // Without this the app burns CPU while idle, and even more when minimized since vsync no longer paces it.
+        .insert_resource(WinitSettings::desktop_app())
         .insert_resource(InitialImagesFilename(images_filename))
         .insert_resource(UiState {
             visible: true,
@@ -392,6 +396,30 @@ fn main() -> Result<()> {
         )
         .add_systems(Update, record_pressed_key.run_if(in_state(MyAppState::EditShortCut)))
         .add_systems(Update, poll_dock_drop_queue.run_if(in_state(MyAppState::Working)))
+        .add_systems(Startup, store_event_loop_proxy)
+        // In reactive mode a message written this frame is only read next frame, which would never come
+        // without new input. Keep updating while any message chain (or a texture upload) is still in flight.
+        .add_systems(
+            Last,
+            (
+                redraw_while_pending::<LoadImagesEvent>,
+                redraw_while_pending::<NewImageLoadedEvent>,
+                redraw_while_pending::<MoveImageEvent>,
+                redraw_while_pending::<SaveCropped>,
+                redraw_while_pending::<ResetScales>,
+                redraw_while_pending::<FitToScreen>,
+                redraw_while_pending::<ChangeTitleStyleEvent>,
+                redraw_while_pending::<SaveSettingsEvent>,
+                redraw_while_pending::<ChangeSamplerEvent>,
+                redraw_while_pending::<RemoveImageEvent>,
+                redraw_while_pending::<ReloadImagesEvent>,
+                redraw_while_pending::<NavigateReviewEvent>,
+                redraw_while_pending::<RefreshReviewEvent>,
+                redraw_while_pending::<ActivateReviewEvent>,
+                redraw_while_pending::<SwitchReviewToFileEvent>,
+                redraw_while_pending::<AssetEvent<Image>>,
+            ),
+        )
         .run();
 
     Ok(())
@@ -739,6 +767,12 @@ fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config
 }
 
 // MARK: Utilities
+fn redraw_while_pending<T: Message>(messages: Res<Messages<T>>, mut redraw_evw: MessageWriter<RequestRedraw>) {
+    if !messages.is_empty() {
+        redraw_evw.write(RequestRedraw);
+    }
+}
+
 fn check_all_images_exist(images: &[String]) -> Result<Vec<String>> {
     let mut images_absolute = Vec::new();
     for image_filename in images {
