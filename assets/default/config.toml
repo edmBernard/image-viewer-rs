@@ -1,18 +1,19 @@
 [shortcut]
+# Keys are the character typed (not the physical position), so they follow the keyboard layout
 # Shortcut to save crop image shown on screen
-save_crop_image = "KeyP"
+save_crop_image = { Character = "p" }
 # Shortcut modifier for local zoom (hold + click to zoom individual image)
-local_zoom_modifier = "KeyW"
+local_zoom_modifier = { Character = "z" }
 # Shortcut modifier for local rotation (hold + click to rotate individual image)
-local_rotate_modifier = "KeyE"
+local_rotate_modifier = { Character = "e" }
 # Shortcut to toggle the multicursor
-switch_cursor = "KeyC"
+switch_cursor = { Character = "c" }
 # Shortcut to switch between layout (grid, stack; horizontal ...)
-switch_layout = "KeyL"
+switch_layout = { Character = "l" }
 # Shortcut to rotate all images
-rotate_images = "KeyR"
+rotate_images = { Character = "r" }
 # Shortcut to toggle add mode (dropped images are added instead of replacing)
-add_images = "KeyQ"
+add_images = { Character = "a" }
 
 [text]
 # Color of the image name shown in the corner

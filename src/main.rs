@@ -11,6 +11,7 @@ mod review;
 mod review_mode;
 mod ui;
 
+use std::collections::HashMap;
 use std::env::home_dir;
 use std::fs::canonicalize;
 use std::fs::File;
@@ -19,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use bevy::camera::Hdr;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
+use bevy::input::keyboard::Key;
+use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, RequestRedraw, WindowResolution};
 use bevy::winit::WinitSettings;
@@ -31,7 +34,7 @@ use crate::dock_drop::{poll_dock_drop_queue, store_event_loop_proxy};
 use crate::input::{
     change_global_rotation, change_global_zoom, change_layout_on_click, change_rotation_individually, change_top_image,
     change_zoom_individually, cursor_move, file_drop, key_change_layout, key_save_cropped, key_toggle_add_mode,
-    key_toggle_cursor, mouse_button_input, record_pressed_key, scroll_events, toggle_help,
+    key_toggle_cursor, mouse_button_input, record_pressed_key, scroll_events, toggle_help, track_shortcut_keys,
 };
 use crate::layout::{
     change_image_title_style, fit_to_screen, on_image_spawned, on_move_cursor, on_move_image, on_move_image_title,
@@ -72,23 +75,6 @@ const DIGIT_KEYS: [KeyCode; 10] = [
     KeyCode::Digit9,
     KeyCode::Digit0,
 ];
-
-const HELP_STRING: &str = "Keyboard Shortcut:
-    L: Change Layout (Grid, Stack, Horizontal, Vertical)
-    Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
-    Shift + 1, 2, 3, ...: Move Image on top
-    Ctrl/Cmd + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
-    Ctrl/Cmd + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
-    Z + Right/Left clic: zoom in/out the hovered image only
-    R: Rotate all images CW
-    E + Right/Left clic: rotate CW/CCW the hovered image only
-    Q: Toggle 'Add Mode' (dropped images are added instead of replacing)
-    C: Toggle multi cursor
-    P: Save image to disk with the displayed crop (suffixed by _crop)
-    H: Toggle Interface
-
-    Drag and Drop image from files explorer.
-";
 
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash)]
 enum MyAppState {
@@ -165,20 +151,22 @@ struct ConfigColor {
 }
 
 // MARK: Config Struct
+// Logical keys (the character typed), so a shortcut stays on the same letter whatever the keyboard layout.
+// Characters are kept lowercase, see ShortcutKeys.
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigShortcut {
-    save_crop_image: KeyCode,
-    local_zoom_modifier: KeyCode,
-    local_rotate_modifier: KeyCode,
-    switch_cursor: KeyCode,
-    switch_layout: KeyCode,
-    rotate_images: KeyCode,
-    add_images: KeyCode,
+    save_crop_image: Key,
+    local_zoom_modifier: Key,
+    local_rotate_modifier: Key,
+    switch_cursor: Key,
+    switch_layout: Key,
+    rotate_images: Key,
+    add_images: Key,
 }
 
 impl ConfigShortcut {
     // Labelled shortcuts, in the order shown in the settings panel
-    fn entries_mut(&mut self) -> [(&'static str, &mut KeyCode); 7] {
+    fn entries_mut(&mut self) -> [(&'static str, &mut Key); 7] {
         [
             ("Save Crop:", &mut self.save_crop_image),
             ("Local Zoom Modifier:", &mut self.local_zoom_modifier),
@@ -235,6 +223,7 @@ fn main() -> Result<()> {
         };
 
         let Ok(config) = toml::from_str(&config_str) else {
+            println!("Invalid config file, using the default one: {}", config_path.display());
             break 'block None;
         };
 
@@ -294,6 +283,7 @@ fn main() -> Result<()> {
         .insert_resource(AddMode(false))
         .insert_resource(MultiCursorEnabled(false))
         .insert_resource(RecordedPressedKey(None))
+        .init_resource::<ShortcutKeys>()
         .insert_resource(GridLayoutState {
             layout: GridLayout::Grid,
             index: 0,
@@ -394,6 +384,8 @@ fn main() -> Result<()> {
             )
                 .run_if(in_state(MyAppState::Working)),
         )
+        .add_systems(PreUpdate, track_shortcut_keys.after(InputSystems))
+        .add_systems(Update, update_help_text)
         .add_systems(Update, record_pressed_key.run_if(in_state(MyAppState::EditShortCut)))
         .add_systems(Update, poll_dock_drop_queue.run_if(in_state(MyAppState::Working)))
         .add_systems(Startup, store_event_loop_proxy)
@@ -523,7 +515,17 @@ struct FontHandle(Handle<Font>);
 struct InitialImagesFilename(Vec<String>);
 
 #[derive(Resource, Debug)]
-struct RecordedPressedKey(Option<KeyCode>);
+struct RecordedPressedKey(Option<Key>);
+
+// Pressed state of logical keys, for the configurable shortcuts. Bevy's ButtonInput<Key> keys the release
+// on the character typed at release time, so pressing Q, pressing Shift then releasing Q leaves "q" stuck.
+// Here the release goes through the physical key that pressed it, and characters are lowercased so
+// shift or caps lock don't matter.
+#[derive(Resource, Default)]
+struct ShortcutKeys {
+    input: ButtonInput<Key>,
+    held: HashMap<KeyCode, Key>,
+}
 
 // Image entities in display order: an image's position in the list is the cell it's shown in.
 // Reordering or removing an image is just a Vec operation, nothing else to renumber.
@@ -718,7 +720,7 @@ fn setup(
     commands.spawn(FontHandle(font_handle.clone()));
 
     commands.spawn((
-        Text::new(HELP_STRING),
+        Text::new(help_string(&config.shortcut)),
         TextFont {
             font: font_handle.into(),
             font_size: FontSize::Px(15.0),
@@ -745,6 +747,15 @@ fn setup(
 }
 
 // MARK: Settings
+fn update_help_text(config: Res<Config>, mut help_query: Query<&mut Text, With<MyHelp>>) {
+    if !config.is_changed() {
+        return;
+    }
+    for mut text in &mut help_query {
+        text.0 = help_string(&config.shortcut);
+    }
+}
+
 fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config: Res<Config>) {
     for _ev in save_settings_evr.read() {
         let Some(dst_path) = config_path() else {
@@ -767,6 +778,41 @@ fn save_settings(mut save_settings_evr: MessageReader<SaveSettingsEvent>, config
 }
 
 // MARK: Utilities
+fn key_label(key: &Key) -> String {
+    match key {
+        Key::Character(character) => character.to_uppercase(),
+        _ => format!("{key:?}"),
+    }
+}
+
+fn help_string(shortcut: &ConfigShortcut) -> String {
+    let layout = key_label(&shortcut.switch_layout);
+    let zoom = key_label(&shortcut.local_zoom_modifier);
+    let rotate_all = key_label(&shortcut.rotate_images);
+    let rotate = key_label(&shortcut.local_rotate_modifier);
+    let add = key_label(&shortcut.add_images);
+    let cursor = key_label(&shortcut.switch_cursor);
+    let save = key_label(&shortcut.save_crop_image);
+    format!(
+        "Keyboard Shortcut:
+    {layout}: Change Layout (Grid, Stack, Horizontal, Vertical)
+    Double-click: Switch between layout Grid-Stack or Horizontal-Vertical
+    Shift + 1, 2, 3, ...: Move Image on top
+    Ctrl + 1, 2, 3, 4, 5: Zoom by 1, 2, 4, 8, 16
+    Ctrl + Shift + 1, 2, 3, 4, 5: Zoom by 1/2, 1/4, 1/8, 1/16, 1/32
+    {zoom} + Left/Right click: zoom in/out the hovered image only
+    {rotate_all}: Rotate all images CW
+    {rotate} + Left/Right click: rotate CW/CCW the hovered image only
+    {add}: Toggle 'Add Mode' (dropped images are added instead of replacing)
+    {cursor}: Toggle multi cursor
+    {save}: Save image to disk with the displayed crop (suffixed by _crop)
+    H: Toggle Interface
+
+    Drag and Drop image from files explorer.
+"
+    )
+}
+
 fn redraw_while_pending<T: Message>(messages: Res<Messages<T>>, mut redraw_evw: MessageWriter<RequestRedraw>) {
     if !messages.is_empty() {
         redraw_evw.write(RequestRedraw);

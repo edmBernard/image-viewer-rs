@@ -3,24 +3,64 @@
 use std::fs::canonicalize;
 use std::time::{Duration, Instant};
 
+use bevy::input::keyboard::Key;
+use bevy::input::keyboard::KeyboardFocusLost;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::MouseWheel;
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use crate::layout::CellGrid;
 use crate::{
     AddMode, Config, GlobalRotation, GlobalScale, GridLayoutState, ImageList, LoadImagesEvent, MouseState,
     MoveImageEvent, MultiCursorEnabled, MyAppState, MyImage, Position, RecordedPressedKey, ReviewState, Rotation,
-    SaveCropped, Scale, ScrollBehavior, SwitchReviewToFileEvent, UiState, CTRL_KEYS, DIGIT_KEYS, SHIFT_KEYS,
+    SaveCropped, Scale, ScrollBehavior, ShortcutKeys, SwitchReviewToFileEvent, UiState, CTRL_KEYS, DIGIT_KEYS,
+    SHIFT_KEYS,
 };
 
 // MARK: Keyboard Handlers
+fn normalize_key(key: &Key) -> Key {
+    match key {
+        Key::Character(character) => Key::Character(character.to_lowercase().into()),
+        _ => key.clone(),
+    }
+}
+
+pub fn track_shortcut_keys(
+    mut keyboard_evr: MessageReader<KeyboardInput>,
+    mut focus_lost_evr: MessageReader<KeyboardFocusLost>,
+    mut shortcut_keys: ResMut<ShortcutKeys>,
+) {
+    shortcut_keys.input.clear();
+    for ev in keyboard_evr.read() {
+        match ev.state {
+            ButtonState::Pressed => {
+                let key = normalize_key(&ev.logical_key);
+                shortcut_keys.input.press(key.clone());
+                shortcut_keys.held.insert(ev.key_code, key);
+            }
+            ButtonState::Released => {
+                let Some(key) = shortcut_keys.held.remove(&ev.key_code) else {
+                    continue;
+                };
+                shortcut_keys.input.release(key);
+            }
+        }
+    }
+    if !focus_lost_evr.is_empty() {
+        focus_lost_evr.clear();
+        shortcut_keys.input.release_all();
+        shortcut_keys.held.clear();
+    }
+}
+
 pub fn key_change_layout(
     config: Res<Config>,
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut layout_state: ResMut<GridLayoutState>,
 ) {
-    if keys.just_pressed(config.shortcut.switch_layout) {
+    if shortcut_keys.input.just_pressed(config.shortcut.switch_layout.clone()) {
         layout_state.layout = layout_state.layout.next();
         move_image_evw.write(MoveImageEvent);
     }
@@ -67,11 +107,11 @@ pub fn change_top_image(
 
 pub fn change_global_rotation(
     config: Res<Config>,
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut global_rotation: ResMut<GlobalRotation>,
 ) {
-    if keys.just_pressed(config.shortcut.rotate_images) {
+    if shortcut_keys.input.just_pressed(config.shortcut.rotate_images.clone()) {
         global_rotation.0 += 1;
         move_image_evw.write(MoveImageEvent);
     };
@@ -107,14 +147,17 @@ fn just_pressed_digit(keys: &ButtonInput<KeyCode>) -> Option<usize> {
 pub fn change_rotation_individually(
     config: Res<Config>,
     windows: Query<&Window>,
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     layout_state: Res<GridLayoutState>,
     image_list: Res<ImageList>,
     mut sprite_query: Query<&mut Rotation, With<MyImage>>,
 ) {
-    if !keys.pressed(config.shortcut.local_rotate_modifier) {
+    if !shortcut_keys
+        .input
+        .pressed(config.shortcut.local_rotate_modifier.clone())
+    {
         return;
     }
     if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
@@ -135,14 +178,14 @@ pub fn change_rotation_individually(
 pub fn change_zoom_individually(
     config: Res<Config>,
     windows: Query<&Window>,
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     layout_state: Res<GridLayoutState>,
     image_list: Res<ImageList>,
     mut sprite_query: Query<(&mut Scale, &mut Position), With<MyImage>>,
 ) {
-    if !keys.pressed(config.shortcut.local_zoom_modifier) {
+    if !shortcut_keys.input.pressed(config.shortcut.local_zoom_modifier.clone()) {
         return;
     }
     if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
@@ -170,46 +213,49 @@ pub fn change_zoom_individually(
     move_image_evw.write(MoveImageEvent);
 }
 
-pub fn toggle_help(keys: Res<ButtonInput<KeyCode>>, mut ui_state: ResMut<UiState>) {
-    if keys.just_pressed(KeyCode::KeyH) {
+pub fn toggle_help(shortcut_keys: Res<ShortcutKeys>, mut ui_state: ResMut<UiState>) {
+    if shortcut_keys.input.just_pressed(Key::Character("h".into())) {
         ui_state.visible = !ui_state.visible;
         ui_state.settings_panel_visible = false;
     }
 }
 
 pub fn key_toggle_cursor(
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     config: Res<Config>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
 ) {
-    if keys.just_pressed(config.shortcut.switch_cursor) {
+    if shortcut_keys.input.just_pressed(config.shortcut.switch_cursor.clone()) {
         cursor_state.0 = !cursor_state.0;
     }
 }
 
 pub fn key_save_cropped(
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     config: Res<Config>,
     mut save_cropped_evw: MessageWriter<SaveCropped>,
 ) {
-    if keys.just_pressed(config.shortcut.save_crop_image) {
+    if shortcut_keys
+        .input
+        .just_pressed(config.shortcut.save_crop_image.clone())
+    {
         save_cropped_evw.write(SaveCropped);
     }
 }
 
-pub fn key_toggle_add_mode(keys: Res<ButtonInput<KeyCode>>, config: Res<Config>, mut add_mode: ResMut<AddMode>) {
-    if keys.just_pressed(config.shortcut.add_images) {
+pub fn key_toggle_add_mode(shortcut_keys: Res<ShortcutKeys>, config: Res<Config>, mut add_mode: ResMut<AddMode>) {
+    if shortcut_keys.input.just_pressed(config.shortcut.add_images.clone()) {
         add_mode.0 = !add_mode.0;
     }
 }
 
 pub fn record_pressed_key(
-    keys: Res<ButtonInput<KeyCode>>,
+    shortcut_keys: Res<ShortcutKeys>,
     mut recorded_key: ResMut<RecordedPressedKey>,
     mut next_state: ResMut<NextState<MyAppState>>,
 ) {
-    match keys.get_pressed().last() {
-        Some(&key) => recorded_key.0 = Some(key),
+    match shortcut_keys.input.get_pressed().last() {
+        Some(key) => recorded_key.0 = Some(key.clone()),
         // Back to Working once the recorded key is released, ui_settings_menu applies it
         None if recorded_key.0.is_some() => next_state.set(MyAppState::Working),
         None => {}

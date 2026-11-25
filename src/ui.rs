@@ -5,11 +5,11 @@ use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::{
-    get_short_name, ActivateReviewEvent, AddMode, ChangeSamplerEvent, ChangeTitleStyleEvent, Config, FitToScreen,
-    GlobalScale, GridLayout, GridLayoutState, ImageList, ImagePath, MoveImageEvent, MultiCursorEnabled, MyAppState,
-    MyImage, NavigateReviewEvent, RecordedPressedKey, RefreshReviewEvent, ReloadImagesEvent, RemoveImageEvent,
-    ResetScales, ReviewState, SamplerMode, SaveCropped, SaveSettingsEvent, ScreenColorSpace, ScrollBehavior,
-    UiPanelArea, UiState,
+    get_short_name, key_label, ActivateReviewEvent, AddMode, ChangeSamplerEvent, ChangeTitleStyleEvent, Config,
+    FitToScreen, GlobalScale, GridLayout, GridLayoutState, ImageList, ImagePath, MoveImageEvent, MultiCursorEnabled,
+    MyAppState, MyImage, NavigateReviewEvent, RecordedPressedKey, RefreshReviewEvent, ReloadImagesEvent,
+    RemoveImageEvent, ResetScales, ReviewState, SamplerMode, SaveCropped, SaveSettingsEvent, ScreenColorSpace,
+    ScrollBehavior, UiPanelArea, UiState,
 };
 
 // MARK: Panel Root
@@ -279,7 +279,7 @@ pub fn ui_settings_menu(
                         ui.horizontal(|ui| {
                             ui.label(label);
                             let mut editing = *editing_shortcut == Some(index);
-                            if ui.toggle_value(&mut editing, format!("{key:?}")).changed() && editing {
+                            if ui.toggle_value(&mut editing, key_label(key)).changed() && editing {
                                 *editing_shortcut = Some(index);
                                 next_state.set(MyAppState::EditShortCut);
                             }
