@@ -54,7 +54,7 @@ fn extract_patterns(filenames: &[&str]) -> Option<ExtractionResult> {
         .iter()
         .map(|filename| InputPattern {
             directory: String::new(),
-            filename: *filename,
+            filename,
         })
         .collect();
     extract_patterns_from_inputs(&inputs)

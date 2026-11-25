@@ -1,5 +1,6 @@
-// #![allow(unused_variables)]
 #![windows_subsystem = "windows"]
+// Bevy systems take their resources and queries as parameters, so long signatures are normal
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod review;
 
@@ -40,6 +41,22 @@ struct Args {
 // Largest 2D texture side assumed when the render device isn't available yet (most Apple GPUs on Metal).
 // Otherwise the device limit is used. Wider or taller images are split into tiles.
 const FALLBACK_MAX_TEXTURE_SIZE: u32 = 16384;
+
+const CTRL_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight];
+const SHIFT_KEYS: [KeyCode; 2] = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
+// In keyboard order, so a key's index is its digit minus one (0 comes last)
+const DIGIT_KEYS: [KeyCode; 10] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+    KeyCode::Digit0,
+];
 
 const HELP_STRING: &str = "Keyboard Shortcut:
     L: Change Layout (Grid, Stack, Horizontal, Vertical)
@@ -144,16 +161,19 @@ struct ConfigShortcut {
     add_images: KeyCode,
 }
 
-// Used to store temporary edition during manual edit
-#[derive(Default)]
-struct ConfigShortcutAsBool {
-    save_crop_image: bool,
-    local_zoom_modifier: bool,
-    local_rotate_modifier: bool,
-    switch_cursor: bool,
-    switch_layout: bool,
-    rotate_images: bool,
-    add_images: bool,
+impl ConfigShortcut {
+    // Labelled shortcuts, in the order shown in the settings panel
+    fn entries_mut(&mut self) -> [(&'static str, &mut KeyCode); 7] {
+        [
+            ("Save Crop:", &mut self.save_crop_image),
+            ("Local Zoom Modifier:", &mut self.local_zoom_modifier),
+            ("Local Rotate Modifier:", &mut self.local_rotate_modifier),
+            ("Change Cursor:", &mut self.switch_cursor),
+            ("Rotate:", &mut self.rotate_images),
+            ("Add Images:", &mut self.add_images),
+            ("Change Layout:", &mut self.switch_layout),
+        ]
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -211,10 +231,7 @@ fn main() -> Result<()> {
         None => {
             let config_str = include_str!("../assets/default/config.toml");
             let Some(config): Option<Config> = toml::from_str(config_str).ok() else {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid Default config : You messed up somewhere it should not happened",
-                )));
+                return Err("Invalid default config: the embedded assets/default/config.toml doesn't parse".into());
             };
             config
         }
@@ -328,11 +345,7 @@ fn main() -> Result<()> {
             )
                 .run_if(in_state(MyAppState::Working)),
         )
-        // Bevy doesn't allow more than 20 systems in the declaration of anonymous system set
-        // https://docs.rs/bevy/latest/bevy/prelude/trait.IntoScheduleConfigs.html#foreign-impls
-        // That should really be in the documentation of `add_systems` method
-        // Seriously :face_palm: Is it Bevy or Rust fault ?
-        // Edit: nice it's now in the documentation
+        // Bevy doesn't allow more than 20 systems in an anonymous system set, hence several add_systems
         .add_systems(
             Update,
             (
@@ -563,12 +576,50 @@ struct UiState {
     image_list_visible: bool,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 enum GridLayout {
     Stack,
     Horizontal,
     Vertical,
     Grid,
+}
+
+impl GridLayout {
+    // In the order of the layout shortcut cycle
+    const ALL: [GridLayout; 4] = [
+        GridLayout::Grid,
+        GridLayout::Stack,
+        GridLayout::Vertical,
+        GridLayout::Horizontal,
+    ];
+
+    fn label(&self) -> &'static str {
+        match self {
+            GridLayout::Grid => "Grid",
+            GridLayout::Stack => "Stack",
+            GridLayout::Vertical => "Vertical",
+            GridLayout::Horizontal => "Horizontal",
+        }
+    }
+
+    fn next(&self) -> Self {
+        match self {
+            GridLayout::Grid => GridLayout::Stack,
+            GridLayout::Stack => GridLayout::Vertical,
+            GridLayout::Vertical => GridLayout::Horizontal,
+            GridLayout::Horizontal => GridLayout::Grid,
+        }
+    }
+
+    // Double-click switches between the two layouts of a pair
+    fn toggle(&self) -> Self {
+        match self {
+            GridLayout::Grid => GridLayout::Stack,
+            GridLayout::Stack => GridLayout::Grid,
+            GridLayout::Vertical => GridLayout::Horizontal,
+            GridLayout::Horizontal => GridLayout::Vertical,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -675,7 +726,7 @@ struct Scale(f32);
 #[derive(Component)]
 struct Position(Vec2);
 
-// Rotation in quarter turn (1 is 1 turn)
+// Rotation in quarter turns, clockwise (1 is 90°)
 #[derive(Component)]
 struct Rotation(i32);
 
@@ -826,32 +877,6 @@ fn configure_visuals(mut egui_ctx: EguiContexts) {
     ctx.set_visuals(egui::Visuals { ..Default::default() });
 }
 
-fn keycode_dropdown(
-    ui: &mut egui::Ui,
-    next_state: &mut ResMut<NextState<MyAppState>>,
-    label: &str,
-    current_key: &mut KeyCode,
-    ongoing: &mut bool,
-    recorded_key: &mut ResMut<RecordedPressedKey>,
-) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-
-        let key_previous = format!("{current_key:?}");
-        let response = ui.toggle_value(ongoing, &key_previous);
-        if response.changed() {
-            if *ongoing {
-                next_state.set(MyAppState::EditShortCut);
-            }
-        }
-        if *ongoing && recorded_key.0.is_some() {
-            *ongoing = false;
-            *current_key = recorded_key.0.unwrap();
-            recorded_key.0 = None;
-        }
-    });
-}
-
 fn ui_bottom_menu(
     mut contexts: EguiContexts,
     mut layout_state: ResMut<GridLayoutState>,
@@ -912,20 +937,13 @@ fn ui_bottom_menu(
                     }
 
                     ui.separator();
-                    let elem1 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Grid, "Grid")
-                        .changed();
-                    let elem2 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Stack, "Stack")
-                        .changed();
-                    let elem3 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Vertical, "Vertical")
-                        .changed();
-                    let elem4 = ui
-                        .selectable_value(&mut layout_state.layout, GridLayout::Horizontal, "Horizontal")
-                        .changed();
-                    if elem1 || elem2 || elem3 || elem4 {
-                        move_image_evw.write(MoveImageEvent);
+                    for layout in GridLayout::ALL {
+                        if ui
+                            .selectable_value(&mut layout_state.layout, layout, layout.label())
+                            .changed()
+                        {
+                            move_image_evw.write(MoveImageEvent);
+                        }
                     }
 
                     ui.separator();
@@ -958,7 +976,8 @@ fn ui_bottom_menu(
 fn ui_settings_menu(
     mut contexts: EguiContexts,
     mut config: ResMut<Config>,
-    mut ongoing_edit: Local<ConfigShortcutAsBool>,
+    // Index in ConfigShortcut::entries_mut of the shortcut being recorded
+    mut editing_shortcut: Local<Option<usize>>,
     mut recorded_key: ResMut<RecordedPressedKey>,
     ui_state: Res<UiState>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
@@ -1060,62 +1079,24 @@ fn ui_settings_menu(
                 });
 
                 CollapsingHeader::new("Short Cut").default_open(true).show(ui, |ui| {
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Save Crop:",
-                        &mut config.shortcut.save_crop_image,
-                        &mut ongoing_edit.save_crop_image,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Local Zoom Modifier:",
-                        &mut config.shortcut.local_zoom_modifier,
-                        &mut ongoing_edit.local_zoom_modifier,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Local Rotate Modifier:",
-                        &mut config.shortcut.local_rotate_modifier,
-                        &mut ongoing_edit.local_rotate_modifier,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Change Cursor:",
-                        &mut config.shortcut.switch_cursor,
-                        &mut ongoing_edit.switch_cursor,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Rotate:",
-                        &mut config.shortcut.rotate_images,
-                        &mut ongoing_edit.rotate_images,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Add Images:",
-                        &mut config.shortcut.add_images,
-                        &mut ongoing_edit.add_images,
-                        &mut recorded_key,
-                    );
-                    keycode_dropdown(
-                        ui,
-                        &mut next_state,
-                        "Change Layout:",
-                        &mut config.shortcut.switch_layout,
-                        &mut ongoing_edit.switch_layout,
-                        &mut recorded_key,
-                    );
+                    // Clicking a shortcut switches to EditShortCut state, where record_pressed_key
+                    // catches the next key; it's applied here once back in Working state
+                    for (index, (label, key)) in config.shortcut.entries_mut().into_iter().enumerate() {
+                        if *editing_shortcut == Some(index) {
+                            if let Some(recorded) = recorded_key.0.take() {
+                                *key = recorded;
+                                *editing_shortcut = None;
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            let mut editing = *editing_shortcut == Some(index);
+                            if ui.toggle_value(&mut editing, format!("{key:?}")).changed() && editing {
+                                *editing_shortcut = Some(index);
+                                next_state.set(MyAppState::EditShortCut);
+                            }
+                        });
+                    }
                 });
 
                 if ui.button("Save Settings").clicked() {
@@ -1389,14 +1370,14 @@ fn tile_grid(width: u32, height: u32, max_size: u32) -> Vec<URect> {
 fn to_texture(image: DynamicImage) -> Option<Image> {
     let usages = RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD;
     match image.color() {
-        ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 => {
+        ColorType::Rgb8 | ColorType::Rgba8 | ColorType::L8 | ColorType::La8 | ColorType::Rgb16 | ColorType::Rgba16 => {
             Some(Image::from_dynamic(image, true, usages))
         }
-        ColorType::Rgb16 | ColorType::Rgba16 => Some(Image::from_dynamic(image, true, usages)),
-        ColorType::L16 => {
-            let image_rgb16 = DynamicImage::ImageRgb16(image.into_rgb16());
-            Some(Image::from_dynamic(image_rgb16, true, usages))
-        }
+        ColorType::L16 => Some(Image::from_dynamic(
+            DynamicImage::ImageRgb16(image.into_rgb16()),
+            true,
+            usages,
+        )),
         _ => {
             println!("Unsupported image type : image.color(): {:?}", image.color());
             None
@@ -1513,7 +1494,6 @@ fn on_move_image(
     layout_state: Res<GridLayoutState>,
     mouse_state: Res<MouseState>,
     image_list: Res<ImageList>,
-    mut title_query: Query<&mut Node, With<MyText>>,
     config: Res<Config>,
 ) {
     if move_image_evr.is_empty() {
@@ -1525,7 +1505,7 @@ fn on_move_image(
     if window.width() == 0. || window.height() == 0. {
         return;
     }
-    let num_images = image_list.0.len();
+    let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
     for (slot, &entity) in image_list.0.iter().enumerate() {
         // Images spawned this frame are listed before their components exist
         let Ok((position, scale, rotation, image_size, mut view_rect, mut transform, mut visibility, children)) =
@@ -1535,11 +1515,9 @@ fn on_move_image(
         };
         let image_size = image_size.0;
 
-        let (cell_offset, cell_size) =
-            get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-        transform.translation = (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
-            .extend(transform.translation.z)
-            * Vec3::new(1., -1., 1.);
+        let cell = grid.cell(slot);
+        let cell_size = cell.size();
+        transform.translation = grid.to_world(cell.center()).extend(transform.translation.z);
         transform.scale = Vec2::splat(scale.0 * global_scale.0).extend(1.);
         let rotation_total = global_rotation.0 + rotation.0;
         transform.rotation = Quat::from_rotation_z(-TAU / 4. * rotation_total as f32);
@@ -1584,21 +1562,7 @@ fn on_move_image(
         }
 
         // Make visible after positioning (sprites start hidden to avoid flash at native resolution)
-        visibility.set_if_neq(cell_visibility(slot, &layout_state));
-    }
-
-    let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window, config.misc.grid_width);
-    for mut node in &mut title_query {
-        node.width = Val::Px(cell_size.x);
-    }
-}
-
-// Only the selected image is shown in Stack layout
-fn cell_visibility(slot: usize, layout_state: &GridLayoutState) -> Visibility {
-    if layout_state.layout == GridLayout::Stack && slot != layout_state.index {
-        Visibility::Hidden
-    } else {
-        Visibility::Visible
+        visibility.set_if_neq(grid.visibility(slot));
     }
 }
 
@@ -1615,17 +1579,18 @@ fn on_move_image_title(
     }
     move_image_evr.clear();
 
-    let num_images = image_list.0.len();
     let window = windows.single().unwrap();
+    let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
 
     for (owner, mut node, mut visibility) in &mut text_query {
         let Some(slot) = image_list.slot(owner.0) else {
             continue;
         };
-        let (cell_offset, _) = get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-        node.top = Val::Px(cell_offset.y + 2.);
-        node.left = Val::Px(cell_offset.x + 5.);
-        visibility.set_if_neq(cell_visibility(slot, &layout_state));
+        let cell = grid.cell(slot);
+        node.top = Val::Px(cell.min.y + 2.);
+        node.left = Val::Px(cell.min.x + 5.);
+        node.width = Val::Px(cell.width());
+        visibility.set_if_neq(grid.visibility(slot));
     }
 }
 
@@ -1652,31 +1617,26 @@ fn on_move_cursor(
     image_list: Res<ImageList>,
     config: Res<Config>,
 ) {
-    let num_images = image_list.0.len();
     let window = windows.single().unwrap();
     if window.width() == 0. || window.height() == 0. {
         return;
     }
+    let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
 
     let cursor_position = window.cursor_position();
     for (owner, mut transform, mut visibility) in &mut cursor_query {
         let Some(slot) = image_list.slot(owner.0) else {
             continue;
         };
-        visibility.set_if_neq(cell_visibility(slot, &layout_state));
+        visibility.set_if_neq(grid.visibility(slot));
 
         let Some(cursor_position) = cursor_position else {
             continue;
         };
-        let (cell_offset, cell_size) =
-            get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-        let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
-        let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
-        transform.translation = Vec3::new(
-            -window.width() / 2. + new_x,
-            window.height() / 2. - new_y,
-            transform.translation.z,
-        );
+        // Same position relative to its own cell as the mouse has in the cell it's in
+        let cell = grid.cell(slot);
+        let position = cell.min + cursor_position.rem_euclid(cell.size());
+        transform.translation = grid.to_world(position).extend(transform.translation.z);
     }
 }
 
@@ -1693,12 +1653,7 @@ fn key_change_layout(
     mut layout_state: ResMut<GridLayoutState>,
 ) {
     if keys.just_pressed(config.shortcut.switch_layout) {
-        layout_state.layout = match layout_state.layout {
-            GridLayout::Grid => GridLayout::Stack,
-            GridLayout::Stack => GridLayout::Vertical,
-            GridLayout::Vertical => GridLayout::Horizontal,
-            GridLayout::Horizontal => GridLayout::Grid,
-        };
+        layout_state.layout = layout_state.layout.next();
         move_image_evw.write(MoveImageEvent);
     }
 }
@@ -1722,12 +1677,7 @@ fn change_layout_on_click(
         }
         *click_timer = Some(now);
 
-        layout_state.layout = match layout_state.layout {
-            GridLayout::Grid => GridLayout::Stack,
-            GridLayout::Stack => GridLayout::Grid,
-            GridLayout::Vertical => GridLayout::Horizontal,
-            GridLayout::Horizontal => GridLayout::Vertical,
-        };
+        layout_state.layout = layout_state.layout.toggle();
         move_image_evw.write(MoveImageEvent);
     }
 }
@@ -1737,36 +1687,13 @@ fn change_top_image(
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut layout_state: ResMut<GridLayoutState>,
 ) {
-    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if ctrl_pressed {
+    if keys.any_pressed(CTRL_KEYS) || !keys.any_pressed(SHIFT_KEYS) {
         return;
     }
-    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    layout_state.index = if shift_pressed && keys.just_pressed(KeyCode::Digit1) {
-        1
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit2) {
-        2
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit3) {
-        3
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit4) {
-        4
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit5) {
-        5
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit6) {
-        6
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit7) {
-        7
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit8) {
-        8
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit9) {
-        9
-    } else if shift_pressed && keys.just_pressed(KeyCode::Digit0) {
-        10
-    } else {
+    let Some(index) = just_pressed_digit(&keys) else {
         return;
     };
-    layout_state.index -= 1;
-
+    layout_state.index = index;
     move_image_evw.write(MoveImageEvent);
 }
 
@@ -1787,36 +1714,26 @@ fn change_global_zoom(
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut global_scale: ResMut<GlobalScale>,
 ) {
-    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let scale_factor = if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit1) {
-        -1.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit2) {
-        -2.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit3) {
-        -3.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit4) {
-        -4.
-    } else if ctrl_pressed && shift_pressed && keys.just_pressed(KeyCode::Digit5) {
-        -5.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit1) {
-        0.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit2) {
-        1.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit3) {
-        2.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit4) {
-        3.
-    } else if ctrl_pressed && keys.just_pressed(KeyCode::Digit5) {
-        4.
-    } else {
+    if !keys.any_pressed(CTRL_KEYS) {
+        return;
+    }
+    // Only 1 to 5 are zoom shortcuts
+    let Some(digit) = just_pressed_digit(&keys).filter(|&digit| digit < 5) else {
         return;
     };
-
-    let zoom_factor = (2_f32).powf(scale_factor);
-    global_scale.0 = zoom_factor;
-
+    // Digit n zooms by 2^(n-1), or by 1/2^n with shift
+    let power = if keys.any_pressed(SHIFT_KEYS) {
+        -(digit as f32 + 1.)
+    } else {
+        digit as f32
+    };
+    global_scale.0 = 2f32.powf(power);
     move_image_evw.write(MoveImageEvent);
+}
+
+// Index of the digit key just pressed: Digit1 is 0, ..., Digit0 is 9
+fn just_pressed_digit(keys: &ButtonInput<KeyCode>) -> Option<usize> {
+    DIGIT_KEYS.iter().position(|&key| keys.just_pressed(key))
 }
 
 fn change_rotation_individually(
@@ -1836,10 +1753,11 @@ fn change_rotation_individually(
         return;
     }
     let window = windows.single().unwrap();
-    let Some(entity) = image_under_cursor(window, &image_list, &layout_state, config.misc.grid_width) else {
+    let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
+    let Some(slot) = window.cursor_position().and_then(|pos| grid.slot_at(pos)) else {
         return;
     };
-    let Ok(mut rotate) = sprite_query.get_mut(entity) else {
+    let Ok(mut rotate) = sprite_query.get_mut(image_list.0[slot]) else {
         return;
     };
     rotate.0 += if buttons.just_pressed(MouseButton::Left) { 1 } else { -1 };
@@ -1863,10 +1781,11 @@ fn change_zoom_individually(
         return;
     }
     let window = windows.single().unwrap();
-    let Some(entity) = image_under_cursor(window, &image_list, &layout_state, config.misc.grid_width) else {
+    let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
+    let Some(slot) = window.cursor_position().and_then(|pos| grid.slot_at(pos)) else {
         return;
     };
-    let Ok((mut scale, position)) = sprite_query.get_mut(entity) else {
+    let Ok((mut scale, position)) = sprite_query.get_mut(image_list.0[slot]) else {
         return;
     };
     scale.0 *= if buttons.just_pressed(MouseButton::Left) {
@@ -1883,65 +1802,75 @@ fn change_zoom_individually(
     move_image_evw.write(MoveImageEvent);
 }
 
-// Image whose cell is under the mouse cursor
-fn image_under_cursor(
-    window: &Window,
-    image_list: &ImageList,
-    layout_state: &GridLayoutState,
+// Cells of the current layout, in window coordinates (origin top-left, y down)
+struct CellGrid {
+    window_size: Vec2,
+    layout: GridLayout,
+    selected: usize,
+    num_images: usize,
     grid_width: i32,
-) -> Option<Entity> {
-    let cursor_position = window.cursor_position()?;
-    // Stacked cells all cover the window, only the selected one is visible
-    if layout_state.layout == GridLayout::Stack {
-        return image_list.0.get(layout_state.index).copied();
-    }
-    let num_images = image_list.0.len();
-    for (slot, &entity) in image_list.0.iter().enumerate() {
-        let (cell_offset, cell_size) = get_cell_rect(slot, num_images, &layout_state.layout, window, grid_width);
-        if Rect::from_corners(cell_offset, cell_offset + cell_size).contains(cursor_position) {
-            return Some(entity);
-        }
-    }
-    None
 }
 
-fn get_cell_rect(
-    index: usize,
-    num_images: usize,
-    layout: &GridLayout,
-    window: &Window,
-    grid_width: i32,
-) -> (Vec2, Vec2) {
-    let (cell_tl, cell_size): (Vec2, Vec2) = match layout {
-        GridLayout::Horizontal => {
-            let step = Vec2::new(window.width() / num_images as f32, 0.);
-            let cell_size = Vec2::new(step.x, window.height());
-            (index as f32 * step, cell_size)
+impl CellGrid {
+    fn new(window: &Window, layout_state: &GridLayoutState, num_images: usize, grid_width: i32) -> Self {
+        CellGrid {
+            window_size: window.size(),
+            layout: layout_state.layout,
+            selected: layout_state.index,
+            num_images,
+            grid_width,
         }
-        GridLayout::Vertical => {
-            let step = Vec2::new(0., window.height() / num_images as f32);
-            let cell_size = Vec2::new(window.width(), step.y.abs());
-            (index as f32 * step, cell_size)
+    }
+
+    fn cell(&self, slot: usize) -> Rect {
+        let n = self.num_images as f32;
+        let size = self.window_size;
+        let (min, cell_size) = match self.layout {
+            GridLayout::Horizontal => {
+                let width = size.x / n;
+                (Vec2::new(slot as f32 * width, 0.), Vec2::new(width, size.y))
+            }
+            GridLayout::Vertical => {
+                let height = size.y / n;
+                (Vec2::new(0., slot as f32 * height), Vec2::new(size.x, height))
+            }
+            GridLayout::Stack => (Vec2::ZERO, size),
+            GridLayout::Grid => {
+                let cols = if self.grid_width == 0 {
+                    n.sqrt().ceil()
+                } else {
+                    self.grid_width as f32
+                };
+                let rows = (n / cols).ceil();
+                let cell_size = size / Vec2::new(cols, rows);
+                let col_row = Vec2::new((slot as f32).rem_euclid(cols), (slot as f32 / cols).floor());
+                (col_row * cell_size, cell_size)
+            }
+        };
+        Rect::from_corners(min, min + cell_size)
+    }
+
+    // Only the selected image is shown in Stack layout
+    fn visibility(&self, slot: usize) -> Visibility {
+        if self.layout == GridLayout::Stack && slot != self.selected {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
         }
-        GridLayout::Stack => {
-            let cell_size = Vec2::new(window.width(), window.height());
-            (Vec2::ZERO, cell_size)
+    }
+
+    // Slot whose cell is at `pos`. Stacked cells all cover the window, the visible one wins.
+    fn slot_at(&self, pos: Vec2) -> Option<usize> {
+        if self.layout == GridLayout::Stack {
+            return (self.selected < self.num_images).then_some(self.selected);
         }
-        GridLayout::Grid => {
-            let grid_width = if grid_width == 0 {
-                (num_images as f32).sqrt().ceil()
-            } else {
-                grid_width as f32
-            };
-            let grid_height = (num_images as f32 / grid_width).ceil();
-            let step = Vec2::new(window.width() / grid_width, window.height() / grid_height);
-            let cell_size = step.abs();
-            let row_index = f32::floor(index as f32 / grid_width);
-            let col_index = f32::rem_euclid(index as f32, grid_width);
-            (Vec2::new(col_index, row_index) * step, cell_size)
-        }
-    };
-    (cell_tl, cell_size)
+        (0..self.num_images).find(|&slot| self.cell(slot).contains(pos))
+    }
+
+    // Window position to world position (origin at the window center, y up)
+    fn to_world(&self, pos: Vec2) -> Vec2 {
+        Vec2::new(pos.x - self.window_size.x / 2., self.window_size.y / 2. - pos.y)
+    }
 }
 
 fn toggle_help(keys: Res<ButtonInput<KeyCode>>, mut ui_state: ResMut<UiState>) {
@@ -1993,43 +1922,24 @@ fn sync_cursors(
                 MyCursor,
             ))
             .with_children(|parent| {
-                let cursor_color = Color::srgb(0.75, 0., 0.);
+                // A crosshair with a gap: 4 bars around the center, the side ones turned a quarter
                 let bar_size = 15.;
-                let cursor_size = Some(Vec2::new(bar_size, 4.0));
-                parent.spawn((
-                    Sprite {
-                        color: cursor_color,
-                        custom_size: cursor_size,
-                        ..default()
-                    },
-                    Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
-                        .with_translation(Vec3::new(bar_size, 0., 1.)),
-                ));
-                parent.spawn((
-                    Sprite {
-                        color: cursor_color,
-                        custom_size: cursor_size,
-                        ..default()
-                    },
-                    Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
-                        .with_translation(Vec3::new(-bar_size, 0., 1.)),
-                ));
-                parent.spawn((
-                    Sprite {
-                        color: cursor_color,
-                        custom_size: cursor_size,
-                        ..default()
-                    },
-                    Transform::from_translation(Vec3::new(0., bar_size, 1.)),
-                ));
-                parent.spawn((
-                    Sprite {
-                        color: cursor_color,
-                        custom_size: cursor_size,
-                        ..default()
-                    },
-                    Transform::from_translation(Vec3::new(0., -bar_size, 1.)),
-                ));
+                let bars = [
+                    (Vec2::new(bar_size, 0.), -TAU / 4.),
+                    (Vec2::new(-bar_size, 0.), -TAU / 4.),
+                    (Vec2::new(0., bar_size), 0.),
+                    (Vec2::new(0., -bar_size), 0.),
+                ];
+                for (offset, angle) in bars {
+                    parent.spawn((
+                        Sprite {
+                            color: Color::srgb(0.75, 0., 0.),
+                            custom_size: Some(Vec2::new(bar_size, 4.)),
+                            ..default()
+                        },
+                        Transform::from_translation(offset.extend(1.)).with_rotation(Quat::from_rotation_z(angle)),
+                    ));
+                }
             });
     }
 }
@@ -2090,16 +2000,13 @@ fn fit_to_screen(
             continue;
         }
 
-        let num_images = image_list.0.len();
-
+        let grid = CellGrid::new(window, &layout_state, image_list.0.len(), config.misc.grid_width);
         let mut first = true;
         for (slot, &entity) in image_list.0.iter().enumerate() {
             let Ok((image_size, mut scale, mut position)) = sprite_query.get_mut(entity) else {
                 continue;
             };
-            let image_size = image_size.0;
-            let (_, cell_size) = get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
-            let factor = f32::min(cell_size.x / image_size.x, cell_size.y / image_size.y);
+            let factor = (grid.cell(slot).size() / image_size.0).min_element();
 
             if first {
                 global_scale.0 = factor;
@@ -2133,14 +2040,11 @@ fn record_pressed_key(
     mut recorded_key: ResMut<RecordedPressedKey>,
     mut next_state: ResMut<NextState<MyAppState>>,
 ) {
-    let mut count = false;
-    for k in keys.get_pressed() {
-        *recorded_key = RecordedPressedKey(Some(*k));
-        count = true;
-    }
-    if !count && recorded_key.0.is_some() {
-        // *recorded_key = RecordedPressedKey(None);
-        next_state.set(MyAppState::Working);
+    match keys.get_pressed().last() {
+        Some(&key) => recorded_key.0 = Some(key),
+        // Back to Working once the recorded key is released, ui_settings_menu applies it
+        None if recorded_key.0.is_some() => next_state.set(MyAppState::Working),
+        None => {}
     }
 }
 
@@ -2233,38 +2137,13 @@ fn scroll_events(
     mut global_scale: ResMut<GlobalScale>,
     mut mouse_state: ResMut<MouseState>,
 ) {
-    match config.misc.scroll_behavior {
-        ScrollBehavior::Zoom => {
-            use bevy::input::mouse::MouseScrollUnit;
-            for ev in scroll_evr.read() {
-                let scroll = match ev.unit {
-                    MouseScrollUnit::Line => ev.y,
-                    MouseScrollUnit::Pixel => ev.y,
-                };
-
-                let zoom_factor = if scroll > 0. { 1.1 } else { 0.9 };
-                global_scale.0 *= zoom_factor;
-
-                move_image_evw.write(MoveImageEvent);
-            }
+    for ev in scroll_evr.read() {
+        match config.misc.scroll_behavior {
+            ScrollBehavior::Zoom => global_scale.0 *= if ev.y > 0. { 1.1 } else { 0.9 },
+            ScrollBehavior::Move => mouse_state.delta += Vec2::new(ev.x, ev.y),
+            ScrollBehavior::None => continue,
         }
-        ScrollBehavior::Move => {
-            use bevy::input::mouse::MouseScrollUnit;
-            for ev in scroll_evr.read() {
-                let scroll_vertical = match ev.unit {
-                    MouseScrollUnit::Line => ev.y,
-                    MouseScrollUnit::Pixel => ev.y,
-                };
-                let scroll_horizontal = match ev.unit {
-                    MouseScrollUnit::Line => ev.x,
-                    MouseScrollUnit::Pixel => ev.x,
-                };
-
-                mouse_state.delta += Vec2::new(scroll_horizontal, scroll_vertical);
-                move_image_evw.write(MoveImageEvent);
-            }
-        }
-        ScrollBehavior::None => {}
+        move_image_evw.write(MoveImageEvent);
     }
 }
 
@@ -2692,23 +2571,14 @@ fn check_all_images_exist(images: &[String]) -> Result<Vec<String>> {
     for image_filename in images {
         let input_path = Path::new(&image_filename);
         if !input_path.exists() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Image not found: {}", image_filename),
-            )));
+            return Err(format!("Image not found: {}", image_filename).into());
         }
         if !input_path.is_file() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Provided Path is not a file: {}", image_filename),
-            )));
+            return Err(format!("Provided Path is not a file: {}", image_filename).into());
         }
         let resolved_path = canonicalize(input_path)?;
         let Some(image_absolute) = resolved_path.as_path().to_str() else {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Can't resolve given path: {}", image_filename),
-            )));
+            return Err(format!("Can't resolve given path: {}", image_filename).into());
         };
         images_absolute.push(String::from(image_absolute));
     }
