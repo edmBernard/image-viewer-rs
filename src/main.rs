@@ -269,7 +269,7 @@ fn main() -> Result<()> {
             delta: Vec2::ZERO,
             pressed: false,
         })
-        .insert_resource(ImageOrder(Vec::new()))
+        .init_resource::<ImageList>()
         .init_resource::<UiPanelArea>()
         .insert_resource(ReviewState::default())
         .insert_resource(PreservedView::default())
@@ -279,14 +279,12 @@ fn main() -> Result<()> {
         .add_message::<MoveImageEvent>()
         .add_message::<ToggleCursor>()
         .add_message::<SaveCropped>()
-        .add_message::<ResetVisibilityEvent>()
         .add_message::<ResetScales>()
         .add_message::<FitToScreen>()
         .add_message::<ChangeTitleStyleEvent>()
         .add_message::<SaveSettingsEvent>()
         .add_message::<ChangeSamplerEvent>()
         .add_message::<RemoveImageEvent>()
-        .add_message::<ReorderImagesEvent>()
         .add_message::<ReloadImagesEvent>()
         .add_message::<NavigateReviewEvent>()
         .add_message::<RefreshReviewEvent>()
@@ -321,7 +319,6 @@ fn main() -> Result<()> {
                 mouse_button_input,
                 cursor_move,
                 file_drop,
-                on_reset_visibility,
                 on_resize_system,
                 on_image_loaded,
                 on_move_cursor,
@@ -354,7 +351,6 @@ fn main() -> Result<()> {
                 change_image_title_style,
                 change_sampler,
                 on_remove_image,
-                on_reorder_images,
             )
                 .run_if(in_state(MyAppState::Working)),
         )
@@ -611,9 +607,16 @@ struct InitialImagesFilename(Vec<String>);
 #[derive(Resource, Debug)]
 struct RecordedPressedKey(Option<KeyCode>);
 
-// Maps display slot -> image Id. Allows reordering images in the list panel.
-#[derive(Resource)]
-struct ImageOrder(Vec<usize>);
+// Image entities in display order: an image's position in the list is the cell it's shown in.
+// Reordering or removing an image is just a Vec operation, nothing else to renumber.
+#[derive(Resource, Default)]
+struct ImageList(Vec<Entity>);
+
+impl ImageList {
+    fn slot(&self, entity: Entity) -> Option<usize> {
+        self.0.iter().position(|&e| e == entity)
+    }
+}
 
 #[derive(Resource)]
 struct ReviewState {
@@ -645,17 +648,18 @@ impl Default for ReviewState {
 }
 
 // Snapshot of the current zoom/pan, captured when switching review sets so the next
-// batch reuses it instead of auto-fitting. Keyed by image Id (cell index).
+// batch reuses it instead of auto-fitting. Indexed by display slot.
 #[derive(Resource, Default)]
 struct PreservedView {
     pending: bool,
     global_scale: f32,
-    cells: std::collections::HashMap<usize, (f32, Vec2)>,
+    cells: Vec<(f32, Vec2)>,
 }
 
 // MARK: Components
+// Links a label or cursor entity to the image it belongs to
 #[derive(Component)]
-struct Id(usize);
+struct ImageOf(Entity);
 
 #[derive(Component)]
 struct Scale(f32);
@@ -721,9 +725,6 @@ struct ResetScales;
 struct FitToScreen;
 
 #[derive(Message)]
-struct ResetVisibilityEvent;
-
-#[derive(Message)]
 struct ChangeSamplerEvent;
 
 struct ImageTile {
@@ -731,25 +732,21 @@ struct ImageTile {
     rect: Rect,
 }
 
+// Loaded images are appended to ImageList in the order their events are read
 #[derive(Message)]
 struct NewImageLoadedEvent {
     tiles: Vec<ImageTile>,
     size: Vec2,
     path: String,
-    index: usize,
 }
 
 #[derive(Message)]
 struct LoadNewImageEvent {
     path: String,
-    index: usize,
 }
 
 #[derive(Message)]
-struct RemoveImageEvent(usize); // the Id of the image to remove
-
-#[derive(Message)]
-struct ReorderImagesEvent; // signal to recompute layout after reorder
+struct RemoveImageEvent(Entity); // the image entity to remove
 
 // Reload every open image from disk, e.g. after the screen color space
 // changed and the decoded pixels must be reconverted.
@@ -808,11 +805,8 @@ fn setup(
         MyHelp,
     ));
 
-    for (index, image) in images_filename.0.iter().enumerate() {
-        load_image_evw.write(LoadNewImageEvent {
-            path: image.clone(),
-            index: index,
-        });
+    for image in &images_filename.0 {
+        load_image_evw.write(LoadNewImageEvent { path: image.clone() });
     }
 }
 
@@ -850,7 +844,6 @@ fn keycode_dropdown(
 fn ui_bottom_menu(
     mut contexts: EguiContexts,
     mut layout_state: ResMut<GridLayoutState>,
-    mut reset_vix_evw: MessageWriter<ResetVisibilityEvent>,
     mut ui_state: ResMut<UiState>,
     mut global_scale: ResMut<GlobalScale>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
@@ -903,7 +896,7 @@ fn ui_bottom_menu(
                         let mut state = i == layout_state.index;
                         if ui.toggle_value(&mut state, format!("{}", i + 1)).changed() {
                             layout_state.index = i;
-                            reset_vix_evw.write(ResetVisibilityEvent);
+                            move_image_evw.write(MoveImageEvent);
                         }
                     }
 
@@ -921,7 +914,6 @@ fn ui_bottom_menu(
                         .selectable_value(&mut layout_state.layout, GridLayout::Horizontal, "Horizontal")
                         .changed();
                     if elem1 || elem2 || elem3 || elem4 {
-                        reset_vix_evw.write(ResetVisibilityEvent);
                         move_image_evw.write(MoveImageEvent);
                     }
 
@@ -1137,23 +1129,17 @@ fn ui_edit_short_cut(mut contexts: EguiContexts, mut panel_area: ResMut<UiPanelA
 fn ui_image_list_panel(
     mut contexts: EguiContexts,
     ui_state: Res<UiState>,
-    mut image_order: ResMut<ImageOrder>,
-    image_path_query: Query<(&Id, &ImagePath), With<MyImage>>,
+    mut image_list: ResMut<ImageList>,
+    image_path_query: Query<&ImagePath, With<MyImage>>,
     mut remove_image_evw: MessageWriter<RemoveImageEvent>,
-    mut reorder_evw: MessageWriter<ReorderImagesEvent>,
+    mut move_image_evw: MessageWriter<MoveImageEvent>,
+    mut review_state: ResMut<ReviewState>,
     mut panel_area: ResMut<UiPanelArea>,
 ) {
     if !ui_state.image_list_visible {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    // Build a lookup from image Id -> short name
-    let mut name_map: Vec<(usize, String)> = Vec::new();
-    for (id, path) in &image_path_query {
-        let short = get_short_name(&path.0).unwrap_or("?");
-        name_map.push((id.0, short.to_string()));
-    }
 
     let mut root = PanelRootUi::new(ctx, "root_image_list", &mut panel_area);
     egui::Panel::left("Image List")
@@ -1165,18 +1151,18 @@ fn ui_image_list_panel(
             });
             ui.separator();
 
-            let mut to_remove: Option<usize> = None;
+            let mut to_remove: Option<Entity> = None;
             let mut from_slot: Option<usize> = None;
             let mut to_slot: Option<usize> = None;
 
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                // We iterate in display order
-                for (slot, &image_id) in image_order.0.iter().enumerate() {
-                    let name = name_map
-                        .iter()
-                        .find(|(id, _)| *id == image_id)
-                        .map(|(_, n)| n.as_str())
-                        .unwrap_or("?");
+                for (slot, &image_entity) in image_list.0.iter().enumerate() {
+                    let name = 'name: {
+                        let Ok(path) = image_path_query.get(image_entity) else {
+                            break 'name "?";
+                        };
+                        get_short_name(&path.0).unwrap_or("?")
+                    };
 
                     let row_id = egui::Id::new("image_list_row").with(slot);
 
@@ -1190,7 +1176,7 @@ fn ui_image_list_panel(
                             .response;
 
                         if ui.button("\u{2716}").on_hover_text("Remove image").clicked() {
-                            to_remove = Some(image_id);
+                            to_remove = Some(image_entity);
                         }
 
                         // Show a drop indicator line and determine insertion point
@@ -1225,146 +1211,64 @@ fn ui_image_list_panel(
             if let (Some(src), Some(mut dst)) = (from_slot, to_slot) {
                 dst -= (src < dst) as usize;
                 if src != dst {
-                    let item = image_order.0.remove(src);
-                    image_order.0.insert(dst, item);
-                    reorder_evw.write(ReorderImagesEvent);
+                    move_item(&mut image_list.0, src, dst);
+                    // Review patterns are per cell, they follow their image
+                    move_item(&mut review_state.cell_patterns, src, dst);
+                    move_item(&mut review_state.editable_patterns, src, dst);
+                    move_image_evw.write(MoveImageEvent);
                 }
             }
 
             // Handle removal
-            if let Some(id_to_remove) = to_remove {
-                remove_image_evw.write(RemoveImageEvent(id_to_remove));
+            if let Some(entity_to_remove) = to_remove {
+                remove_image_evw.write(RemoveImageEvent(entity_to_remove));
             }
         });
+}
+
+fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() || to >= items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    items.insert(to, item);
 }
 
 fn on_remove_image(
     mut remove_evr: MessageReader<RemoveImageEvent>,
     mut commands: Commands,
-    mut query_by_id: Query<(Entity, &mut Id)>,
-    mut image_order: ResMut<ImageOrder>,
+    owned_query: Query<(Entity, &ImageOf)>,
+    mut image_list: ResMut<ImageList>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
     mut review_state: ResMut<ReviewState>,
 ) {
     for ev in remove_evr.read() {
-        let target_id = ev.0;
+        let target = ev.0;
+        let Some(slot) = image_list.slot(target) else {
+            continue;
+        };
+        image_list.0.remove(slot);
 
-        // Despawn all entity with matching Id
-        for (entity, id) in &query_by_id {
-            if id.0 == target_id {
+        // The image despawns with its tiles; its label and cursor are separate entities
+        commands.entity(target).despawn();
+        for (entity, owner) in &owned_query {
+            if owner.0 == target {
                 commands.entity(entity).despawn();
-                continue;
             }
         }
 
         // Remove the corresponding review pattern
-        if review_state.enabled && target_id < review_state.cell_patterns.len() {
-            review_state.cell_patterns.remove(target_id);
+        if review_state.enabled && slot < review_state.cell_patterns.len() {
+            review_state.cell_patterns.remove(slot);
         }
-        if review_state.enabled && target_id < review_state.editable_patterns.len() {
-            review_state.editable_patterns.remove(target_id);
+        if review_state.enabled && slot < review_state.editable_patterns.len() {
+            review_state.editable_patterns.remove(slot);
         }
-
-        // Remove from ImageOrder, keeping remaining in display order
-        image_order.0.retain(|&id| id != target_id);
-
-        // Reassign contiguous Ids on remaining entities using two passes to avoid collisions.
-        let old_ids: Vec<usize> = image_order.0.clone();
-        let count = old_ids.len();
-
-        // Pass 1: shift to temporary range
-        for &old_id in &old_ids {
-            let temp_id = old_id + count + 1;
-            for (_, mut id) in &mut query_by_id {
-                if id.0 == old_id {
-                    id.0 = temp_id;
-                    continue;
-                }
-            }
-        }
-
-        // Pass 2: assign final contiguous values
-        for (new_idx, &old_id) in old_ids.iter().enumerate() {
-            let temp_id = old_id + count + 1;
-            for (_, mut id) in &mut query_by_id {
-                if id.0 == temp_id {
-                    id.0 = new_idx;
-                    continue;
-                }
-            }
-        }
-
-        // Rebuild ImageOrder as contiguous [0, 1, 2, ...]
-        let count = image_order.0.len();
-        image_order.0 = (0..count).collect();
 
         fit_to_screen_evw.write(FitToScreen);
         move_image_evw.write(MoveImageEvent);
     }
-}
-
-fn on_reorder_images(
-    mut reorder_evr: MessageReader<ReorderImagesEvent>,
-    mut image_order: ResMut<ImageOrder>,
-    mut query_by_id: Query<&mut Id>,
-    mut move_image_evw: MessageWriter<MoveImageEvent>,
-    mut reset_vis_evw: MessageWriter<ResetVisibilityEvent>,
-    mut review_state: ResMut<ReviewState>,
-) {
-    if reorder_evr.is_empty() {
-        return;
-    }
-    reorder_evr.clear();
-
-    // After a drag-and-drop reorder, ImageOrder[new_slot] = old_id.
-    // We need to reassign Id components so that each entity's Id matches its new display slot.
-    // A direct loop fails when two slots swap because the first rename collides with the second.
-    // Fix: two passes — first shift all Ids to a temporary range, then assign final values.
-    let order_snapshot: Vec<usize> = image_order.0.clone();
-    let count = order_snapshot.len();
-
-    // Pass 1: rename old_id -> old_id + count (temporary, guaranteed unique)
-    for &old_id in &order_snapshot {
-        let temp_id = old_id + count;
-        for mut id in &mut query_by_id {
-            if id.0 == old_id {
-                id.0 = temp_id;
-                continue;
-            }
-        }
-    }
-
-    // Pass 2: rename temp_id -> new_idx (final contiguous value)
-    for (new_idx, &old_id) in order_snapshot.iter().enumerate() {
-        let temp_id = old_id + count;
-        for mut id in &mut query_by_id {
-            if id.0 == temp_id {
-                id.0 = new_idx;
-                continue;
-            }
-        }
-    }
-
-    // Reorder review patterns to follow the new image order
-    if review_state.enabled && !review_state.cell_patterns.is_empty() {
-        let old_patterns = review_state.cell_patterns.clone();
-        let old_editable = review_state.editable_patterns.clone();
-        for (new_idx, &old_id) in order_snapshot.iter().enumerate() {
-            if old_id < old_patterns.len() {
-                review_state.cell_patterns[new_idx] = old_patterns[old_id].clone();
-            }
-            if old_id < old_editable.len() {
-                review_state.editable_patterns[new_idx] = old_editable[old_id].clone();
-            }
-        }
-    }
-
-    // Rebuild ImageOrder as contiguous [0, 1, 2, ...]
-    image_order.0 = (0..count).collect();
-
-    move_image_evw.write(MoveImageEvent);
-    reset_vis_evw.write(ResetVisibilityEvent);
 }
 
 fn on_load_image(
@@ -1442,7 +1346,6 @@ fn on_load_image(
             tiles,
             size,
             path: ev.path.clone(),
-            index: ev.index,
         });
     }
 }
@@ -1486,30 +1389,32 @@ fn on_image_loaded(
     config: Res<Config>,
     mut load_image_evr: MessageReader<NewImageLoadedEvent>,
     mut commands: Commands,
-    images: Query<Entity, With<Id>>,
+    owned_query: Query<Entity, With<ImageOf>>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
     mut is_new_batch: ResMut<NewImageBatch>,
-    mut image_order: ResMut<ImageOrder>,
+    mut image_list: ResMut<ImageList>,
 ) {
     for ev in load_image_evr.read() {
         let font = font_query.single().unwrap();
 
         if is_new_batch.0 {
-            for entity in &images {
+            for &entity in &image_list.0 {
                 commands.entity(entity).despawn();
             }
-            image_order.0.clear();
+            for entity in &owned_query {
+                commands.entity(entity).despawn();
+            }
+            image_list.0.clear();
             is_new_batch.0 = false;
         }
 
         // Start hidden; on_move_image will make it visible after positioning.
         // The image entity carries the view state; each tile child carries one texture.
-        commands
+        let image_entity = commands
             .spawn((
                 Transform::default(),
                 Visibility::Hidden,
-                Id(ev.index),
                 Scale(1.),
                 Position(Vec2::ZERO),
                 Rotation(0),
@@ -1529,7 +1434,8 @@ fn on_image_loaded(
                         MyTile,
                     ));
                 }
-            });
+            })
+            .id();
 
         let short_path = get_short_name(&ev.path).unwrap_or("");
         commands.spawn((
@@ -1549,12 +1455,11 @@ fn on_image_loaded(
                 ..default()
             },
             Visibility::Hidden,
-            Id(ev.index),
+            ImageOf(image_entity),
             MyText,
         ));
 
-        // Track the new image in display order
-        image_order.0.push(ev.index);
+        image_list.0.push(image_entity);
 
         let mut help_visibility = help_query.single_mut().unwrap();
         *help_visibility = Visibility::Hidden;
@@ -1566,7 +1471,6 @@ fn on_move_image(
     windows: Query<&Window>,
     mut sprite_position: Query<
         (
-            &Id,
             &Position,
             &Scale,
             &Rotation,
@@ -1583,6 +1487,7 @@ fn on_move_image(
     global_rotation: Res<GlobalRotation>,
     layout_state: Res<GridLayoutState>,
     mouse_state: Res<MouseState>,
+    image_list: Res<ImageList>,
     mut title_query: Query<&mut Node, With<MyText>>,
     config: Res<Config>,
 ) {
@@ -1595,14 +1500,18 @@ fn on_move_image(
     if window.width() == 0. || window.height() == 0. {
         return;
     }
-    let num_images = sprite_position.iter().count();
-    for (id, position, scale, rotation, image_size, mut view_rect, mut transform, mut visibility, children) in
-        &mut sprite_position
-    {
+    let num_images = image_list.0.len();
+    for (slot, &entity) in image_list.0.iter().enumerate() {
+        // Images spawned this frame are listed before their components exist
+        let Ok((position, scale, rotation, image_size, mut view_rect, mut transform, mut visibility, children)) =
+            sprite_position.get_mut(entity)
+        else {
+            continue;
+        };
         let image_size = image_size.0;
 
         let (cell_offset, cell_size) =
-            get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+            get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
         transform.translation = (Vec2::new(-window.width() / 2., -window.height() / 2.) + cell_offset + cell_size / 2.)
             .extend(transform.translation.z)
             * Vec3::new(1., -1., 1.);
@@ -1650,16 +1559,7 @@ fn on_move_image(
         }
 
         // Make visible after positioning (sprites start hidden to avoid flash at native resolution)
-        *visibility = match layout_state.layout {
-            GridLayout::Stack => {
-                if id.0 == layout_state.index {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                }
-            }
-            _ => Visibility::Visible,
-        };
+        visibility.set_if_neq(cell_visibility(slot, &layout_state));
     }
 
     let (_, cell_size) = get_cell_rect(0, num_images, &layout_state.layout, window, config.misc.grid_width);
@@ -1668,11 +1568,21 @@ fn on_move_image(
     }
 }
 
+// Only the selected image is shown in Stack layout
+fn cell_visibility(slot: usize, layout_state: &GridLayoutState) -> Visibility {
+    if layout_state.layout == GridLayout::Stack && slot != layout_state.index {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    }
+}
+
 fn on_move_image_title(
     mut move_image_evr: MessageReader<MoveImageEvent>,
     windows: Query<&Window>,
-    mut text_query: Query<(&Id, &mut Node, &mut Visibility), With<MyText>>,
+    mut text_query: Query<(&ImageOf, &mut Node, &mut Visibility), With<MyText>>,
     layout_state: Res<GridLayoutState>,
+    image_list: Res<ImageList>,
     config: Res<Config>,
 ) {
     if move_image_evr.is_empty() {
@@ -1680,23 +1590,17 @@ fn on_move_image_title(
     }
     move_image_evr.clear();
 
-    let num_images = text_query.iter().count();
+    let num_images = image_list.0.len();
     let window = windows.single().unwrap();
 
-    for (id, mut node, mut visibility) in &mut text_query {
-        let (cell_offset, _) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+    for (owner, mut node, mut visibility) in &mut text_query {
+        let Some(slot) = image_list.slot(owner.0) else {
+            continue;
+        };
+        let (cell_offset, _) = get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
         node.top = Val::Px(cell_offset.y + 2.);
         node.left = Val::Px(cell_offset.x + 5.);
-        *visibility = match layout_state.layout {
-            GridLayout::Stack => {
-                if id.0 == layout_state.index {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                }
-            }
-            _ => Visibility::Visible,
-        };
+        visibility.set_if_neq(cell_visibility(slot, &layout_state));
     }
 }
 
@@ -1718,22 +1622,29 @@ fn change_image_title_style(
 
 fn on_move_cursor(
     windows: Query<&Window>,
-    mut cursor_query: Query<(&Id, &mut Transform), With<MyCursor>>,
+    mut cursor_query: Query<(&ImageOf, &mut Transform, &mut Visibility), With<MyCursor>>,
     layout_state: Res<GridLayoutState>,
+    image_list: Res<ImageList>,
     config: Res<Config>,
 ) {
-    let num_images = cursor_query.iter().count();
+    let num_images = image_list.0.len();
     let window = windows.single().unwrap();
     if window.width() == 0. || window.height() == 0. {
         return;
     }
 
-    let Some(cursor_position) = window.cursor_position() else {
-        return;
-    };
-    for (id, mut transform) in &mut cursor_query {
+    let cursor_position = window.cursor_position();
+    for (owner, mut transform, mut visibility) in &mut cursor_query {
+        let Some(slot) = image_list.slot(owner.0) else {
+            continue;
+        };
+        visibility.set_if_neq(cell_visibility(slot, &layout_state));
+
+        let Some(cursor_position) = cursor_position else {
+            continue;
+        };
         let (cell_offset, cell_size) =
-            get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+            get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
         let new_y = cell_offset.y + f32::rem_euclid(cursor_position.y, cell_size.y);
         let new_x = cell_offset.x + f32::rem_euclid(cursor_position.x, cell_size.x);
         transform.translation = Vec3::new(
@@ -1750,32 +1661,10 @@ fn on_resize_system(mut resize_evr: MessageReader<WindowResized>, mut move_image
     }
 }
 
-fn on_reset_visibility(
-    mut reset_evr: MessageReader<ResetVisibilityEvent>,
-    mut visibility_query: Query<(&Id, &mut Visibility)>,
-    layout_state: Res<GridLayoutState>,
-) {
-    for _ in reset_evr.read() {
-        for (i, mut visibility) in &mut visibility_query {
-            *visibility = match layout_state.layout {
-                GridLayout::Stack => {
-                    if i.0 == layout_state.index {
-                        Visibility::Visible
-                    } else {
-                        Visibility::Hidden
-                    }
-                }
-                _ => Visibility::Visible,
-            }
-        }
-    }
-}
-
 fn key_change_layout(
     config: Res<Config>,
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
-    mut reset_vix_evw: MessageWriter<ResetVisibilityEvent>,
     mut layout_state: ResMut<GridLayoutState>,
 ) {
     if keys.just_pressed(config.shortcut.switch_layout) {
@@ -1785,7 +1674,6 @@ fn key_change_layout(
             GridLayout::Vertical => GridLayout::Horizontal,
             GridLayout::Horizontal => GridLayout::Grid,
         };
-        reset_vix_evw.write(ResetVisibilityEvent);
         move_image_evw.write(MoveImageEvent);
     }
 }
@@ -1793,7 +1681,6 @@ fn key_change_layout(
 fn change_layout_on_click(
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
-    mut reset_vix_evw: MessageWriter<ResetVisibilityEvent>,
     mut layout_state: ResMut<GridLayoutState>,
     mut click_timer: Local<Option<Instant>>,
 ) {
@@ -1816,7 +1703,6 @@ fn change_layout_on_click(
             GridLayout::Vertical => GridLayout::Horizontal,
             GridLayout::Horizontal => GridLayout::Vertical,
         };
-        reset_vix_evw.write(ResetVisibilityEvent);
         move_image_evw.write(MoveImageEvent);
     }
 }
@@ -1824,7 +1710,6 @@ fn change_layout_on_click(
 fn change_top_image(
     keys: Res<ButtonInput<KeyCode>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
-    mut visibility_query: Query<(&Id, &mut Visibility)>,
     mut layout_state: ResMut<GridLayoutState>,
 ) {
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
@@ -1856,19 +1741,6 @@ fn change_top_image(
         return;
     };
     layout_state.index -= 1;
-
-    for (i, mut visibility) in &mut visibility_query {
-        *visibility = match layout_state.layout {
-            GridLayout::Stack => {
-                if i.0 == layout_state.index {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                }
-            }
-            _ => Visibility::Visible,
-        };
-    }
 
     move_image_evw.write(MoveImageEvent);
 }
@@ -1929,14 +1801,15 @@ fn change_rotation_individually(
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     layout_state: Res<GridLayoutState>,
-    mut sprite_query: Query<(&Id, &mut Rotation), With<MyImage>>,
+    image_list: Res<ImageList>,
+    mut sprite_query: Query<&mut Rotation, With<MyImage>>,
 ) {
     if keys.pressed(config.shortcut.local_rotate_modifier) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
             return;
         }
 
-        let num_images = sprite_query.iter().count();
+        let num_images = image_list.0.len();
         let window = windows.single().unwrap();
 
         let Some(cursor_position) = window.cursor_position() else {
@@ -1945,16 +1818,18 @@ fn change_rotation_individually(
 
         let rotate_turn = if buttons.just_pressed(MouseButton::Left) { 1 } else { -1 };
 
-        for (id, mut rotate) in &mut sprite_query {
+        for (slot, &entity) in image_list.0.iter().enumerate() {
             let (cell_offset, cell_size) =
-                get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+                get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
 
             if cursor_position.x > cell_offset.x
                 && cursor_position.x < cell_offset.x + cell_size.x
                 && cursor_position.y > cell_offset.y
                 && cursor_position.y < cell_offset.y + cell_size.y
             {
-                rotate.0 += rotate_turn;
+                if let Ok(mut rotate) = sprite_query.get_mut(entity) {
+                    rotate.0 += rotate_turn;
+                }
                 break;
             }
         }
@@ -1970,14 +1845,15 @@ fn change_zoom_individually(
     buttons: Res<ButtonInput<MouseButton>>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     layout_state: Res<GridLayoutState>,
-    mut sprite_query: Query<(&Id, &mut Scale, &mut Position), With<MyImage>>,
+    image_list: Res<ImageList>,
+    mut sprite_query: Query<(&mut Scale, &mut Position), With<MyImage>>,
 ) {
     if keys.pressed(config.shortcut.local_zoom_modifier) {
         if !(buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right)) {
             return;
         }
 
-        let num_images = sprite_query.iter().count();
+        let num_images = image_list.0.len();
         let window = windows.single().unwrap();
 
         let Some(cursor_position) = window.cursor_position() else {
@@ -1990,15 +1866,18 @@ fn change_zoom_individually(
         };
 
         let position_normalized = 'outer: {
-            for (id, mut scale, position) in &mut sprite_query {
+            for (slot, &entity) in image_list.0.iter().enumerate() {
                 let (cell_offset, cell_size) =
-                    get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+                    get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
 
                 if cursor_position.x > cell_offset.x
                     && cursor_position.x < cell_offset.x + cell_size.x
                     && cursor_position.y > cell_offset.y
                     && cursor_position.y < cell_offset.y + cell_size.y
                 {
+                    let Ok((mut scale, position)) = sprite_query.get_mut(entity) else {
+                        break 'outer None;
+                    };
                     scale.0 *= scale_factor;
                     break 'outer Some(position.0 * scale.0);
                 }
@@ -2008,7 +1887,7 @@ fn change_zoom_individually(
 
         if let Some(pos) = position_normalized {
             // Reset position for other images to match the one we zoom
-            for (_id, scale, mut position) in &mut sprite_query {
+            for (scale, mut position) in &mut sprite_query {
                 position.0 = pos / scale.0;
             }
         }
@@ -2078,17 +1957,17 @@ fn toggle_cursor(
     mut commands: Commands,
     cursor_query: Query<Entity, With<MyCursor>>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
-    image_query: Query<&Id, With<MyImage>>,
+    image_list: Res<ImageList>,
 ) {
     for _ev in toggle_evr.read() {
         if cursor_query.iter().count() == 0 {
             *cursor_state = MultiCursorEnabled(true);
-            for id in &image_query {
+            for &image_entity in &image_list.0 {
                 commands
                     .spawn((
                         Transform::from_translation(Vec3::new(0., 0., 1.)),
                         Visibility::default(),
-                        Id(id.0),
+                        ImageOf(image_entity),
                         MyCursor,
                     ))
                     .with_children(|parent| {
@@ -2154,8 +2033,8 @@ fn reset_scales(
     }
 }
 
-fn on_image_spawned(mut fit_to_screen_evw: MessageWriter<FitToScreen>, sprite_query: Query<&Id, Added<MyImage>>) {
-    if sprite_query.iter().count() == 0 {
+fn on_image_spawned(mut fit_to_screen_evw: MessageWriter<FitToScreen>, sprite_query: Query<(), Added<MyImage>>) {
+    if sprite_query.is_empty() {
         return;
     }
 
@@ -2166,7 +2045,8 @@ fn fit_to_screen(
     mut fit_to_screen_evr: MessageReader<FitToScreen>,
     windows: Query<&Window>,
     mut global_scale: ResMut<GlobalScale>,
-    mut sprite_query: Query<(&Id, &ImageSize, &mut Scale, &mut Position), With<MyImage>>,
+    mut sprite_query: Query<(&ImageSize, &mut Scale, &mut Position), With<MyImage>>,
+    image_list: Res<ImageList>,
     layout_state: Res<GridLayoutState>,
     config: Res<Config>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
@@ -2181,8 +2061,11 @@ fn fit_to_screen(
         // When switching review sets we reuse the previous zoom/pan instead of refitting.
         if preserved.pending {
             global_scale.0 = preserved.global_scale;
-            for (id, _size, mut scale, mut position) in &mut sprite_query {
-                if let Some(&(cell_scale, cell_position)) = preserved.cells.get(&id.0) {
+            for (slot, &entity) in image_list.0.iter().enumerate() {
+                let Ok((_size, mut scale, mut position)) = sprite_query.get_mut(entity) else {
+                    continue;
+                };
+                if let Some(&(cell_scale, cell_position)) = preserved.cells.get(slot) {
                     scale.0 = cell_scale;
                     position.0 = cell_position;
                 }
@@ -2192,12 +2075,15 @@ fn fit_to_screen(
             continue;
         }
 
-        let num_images = sprite_query.iter().count();
+        let num_images = image_list.0.len();
 
         let mut first = true;
-        for (id, image_size, mut scale, mut position) in &mut sprite_query {
+        for (slot, &entity) in image_list.0.iter().enumerate() {
+            let Ok((image_size, mut scale, mut position)) = sprite_query.get_mut(entity) else {
+                continue;
+            };
             let image_size = image_size.0;
-            let (_, cell_size) = get_cell_rect(id.0, num_images, &layout_state.layout, window, config.misc.grid_width);
+            let (_, cell_size) = get_cell_rect(slot, num_images, &layout_state.layout, window, config.misc.grid_width);
             let factor = f32::min(cell_size.x / image_size.x, cell_size.y / image_size.y);
 
             if first {
@@ -2482,7 +2368,6 @@ fn file_drop(
     add_mode: Res<AddMode>,
     review_state: Res<ReviewState>,
     mut switch_review_evw: MessageWriter<SwitchReviewToFileEvent>,
-    sprite_query: Query<&Id, With<MyImage>>,
 ) {
     if dnd_evr.is_empty() {
         return;
@@ -2517,18 +2402,12 @@ fn file_drop(
     }
 
     if some_file_dropped {
-        let mut count: usize = if add_mode.0 {
-            sprite_query.iter().count()
-        } else {
+        // In add mode the new images are appended after the current ones
+        if !add_mode.0 {
             is_new_batch.0 = true;
-            0
-        };
+        }
         for filename in images_filename {
-            load_image_evw.write(LoadNewImageEvent {
-                path: filename,
-                index: count,
-            });
-            count += 1;
+            load_image_evw.write(LoadNewImageEvent { path: filename });
         }
     }
 }
@@ -2607,24 +2486,26 @@ fn on_reload_images(
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
-    view_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
-    path_query: Query<(&Id, &ImagePath), With<MyImage>>,
+    image_list: Res<ImageList>,
+    view_query: Query<(&Scale, &Position), With<MyImage>>,
+    path_query: Query<&ImagePath, With<MyImage>>,
 ) {
     if reload_evr.is_empty() {
         return;
     }
     reload_evr.clear();
 
-    let mut id_paths: Vec<(usize, String)> = path_query.iter().map(|(id, path)| (id.0, path.0.clone())).collect();
-    if id_paths.is_empty() {
+    if image_list.0.is_empty() {
         return;
     }
-    id_paths.sort_by_key(|(id, _)| *id);
 
-    capture_view(&mut preserved, global_scale.0, &view_query);
+    capture_view(&mut preserved, global_scale.0, &image_list, &view_query);
     is_new_batch.0 = true;
-    for (index, path) in id_paths {
-        load_image_evw.write(LoadNewImageEvent { path, index });
+    for &entity in &image_list.0 {
+        let Ok(path) = path_query.get(entity) else {
+            continue;
+        };
+        load_image_evw.write(LoadNewImageEvent { path: path.0.clone() });
     }
 }
 
@@ -2632,7 +2513,6 @@ fn poll_dock_drop_queue(
     mut is_new_batch: ResMut<NewImageBatch>,
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
     add_mode: Res<AddMode>,
-    sprite_query: Query<&Id, With<MyImage>>,
 ) {
     let Ok(mut queue) = DOCK_DROP_QUEUE.lock() else {
         return;
@@ -2644,15 +2524,11 @@ fn poll_dock_drop_queue(
     let paths: Vec<String> = queue.drain(..).collect();
     drop(queue);
 
-    let count: usize = if add_mode.0 { sprite_query.iter().count() } else { 0 };
     if !add_mode.0 {
         is_new_batch.0 = true;
     }
-    for (index, path) in paths.into_iter().enumerate() {
-        load_image_evw.write(LoadNewImageEvent {
-            path,
-            index: count + index,
-        });
+    for path in paths {
+        load_image_evw.write(LoadNewImageEvent { path });
     }
 }
 
@@ -2663,12 +2539,16 @@ fn poll_dock_drop_queue(
 fn capture_view(
     preserved: &mut PreservedView,
     global_scale: f32,
-    sprite_query: &Query<(&Id, &Scale, &Position), With<MyImage>>,
+    image_list: &ImageList,
+    sprite_query: &Query<(&Scale, &Position), With<MyImage>>,
 ) {
     preserved.global_scale = global_scale;
     preserved.cells.clear();
-    for (id, scale, position) in sprite_query {
-        preserved.cells.insert(id.0, (scale.0, position.0));
+    for &entity in &image_list.0 {
+        let Ok((scale, position)) = sprite_query.get(entity) else {
+            continue;
+        };
+        preserved.cells.push((scale.0, position.0));
     }
     preserved.pending = !preserved.cells.is_empty();
 }
@@ -2680,13 +2560,14 @@ fn on_navigate_review(
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
-    sprite_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
+    image_list: Res<ImageList>,
+    sprite_query: Query<(&Scale, &Position), With<MyImage>>,
 ) {
     for ev in navigate_evr.read() {
         if review_state.radixes.is_empty() {
             continue;
         }
-        capture_view(&mut preserved, global_scale.0, &sprite_query);
+        capture_view(&mut preserved, global_scale.0, &image_list, &sprite_query);
         let count = review_state.radixes.len() as i32;
         let new_index = (review_state.current_index as i32 + ev.0).rem_euclid(count) as usize;
         review_state.current_index = new_index;
@@ -2696,9 +2577,9 @@ fn on_navigate_review(
         let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
 
         is_new_batch.0 = true;
-        for (index, file) in files.into_iter().enumerate() {
+        for file in files {
             let Some(path) = file else { continue };
-            load_image_evw.write(LoadNewImageEvent { path, index });
+            load_image_evw.write(LoadNewImageEvent { path });
         }
     }
 }
@@ -2710,7 +2591,8 @@ fn on_switch_review_to_file(
     mut load_image_evw: MessageWriter<LoadNewImageEvent>,
     mut preserved: ResMut<PreservedView>,
     global_scale: Res<GlobalScale>,
-    sprite_query: Query<(&Id, &Scale, &Position), With<MyImage>>,
+    image_list: Res<ImageList>,
+    sprite_query: Query<(&Scale, &Position), With<MyImage>>,
 ) {
     for ev in switch_evr.read() {
         let Some(filename) = Path::new(&ev.0).file_name().and_then(|name| name.to_str()) else {
@@ -2723,7 +2605,7 @@ fn on_switch_review_to_file(
             continue;
         };
 
-        capture_view(&mut preserved, global_scale.0, &sprite_query);
+        capture_view(&mut preserved, global_scale.0, &image_list, &sprite_query);
 
         // Locate the set in the scanned list so the counter stays in sync. If it isn't there
         // (e.g. dropped from outside the reviewed directory) we still load it, leaving the index.
@@ -2736,9 +2618,9 @@ fn on_switch_review_to_file(
 
         review_state.error = None;
         is_new_batch.0 = true;
-        for (index, file) in files.into_iter().enumerate() {
+        for file in files {
             let Some(path) = file else { continue };
-            load_image_evw.write(LoadNewImageEvent { path, index });
+            load_image_evw.write(LoadNewImageEvent { path });
         }
     }
 }
@@ -2746,14 +2628,19 @@ fn on_switch_review_to_file(
 fn on_activate_review(
     mut activate_evr: MessageReader<ActivateReviewEvent>,
     mut review_state: ResMut<ReviewState>,
-    image_query: Query<(&Id, &ImagePath), With<MyImage>>,
+    image_list: Res<ImageList>,
+    image_query: Query<&ImagePath, With<MyImage>>,
 ) {
     for _ev in activate_evr.read() {
         review_state.error = None;
-        // Collect paths sorted by Id so pattern order matches display order
-        let mut id_paths: Vec<(usize, String)> = image_query.iter().map(|(id, p)| (id.0, p.0.clone())).collect();
-        id_paths.sort_by_key(|(id, _)| *id);
-        let paths: Vec<String> = id_paths.into_iter().map(|(_, p)| p).collect();
+        // Paths in display order so pattern order matches the cells
+        let mut paths = Vec::new();
+        for &entity in &image_list.0 {
+            let Ok(path) = image_query.get(entity) else {
+                continue;
+            };
+            paths.push(path.0.clone());
+        }
         if paths.len() < 2 {
             review_state.error = Some("Review mode needs at least 2 images".to_string());
             continue;
@@ -2815,9 +2702,9 @@ fn on_refresh_review(
         if let Some(radix) = review_state.radixes.get(review_state.current_index) {
             let files = review::resolve_files_for_radix(&directory, radix, &review_state.cell_patterns);
             is_new_batch.0 = true;
-            for (index, file) in files.into_iter().enumerate() {
+            for file in files {
                 let Some(path) = file else { continue };
-                load_image_evw.write(LoadNewImageEvent { path, index });
+                load_image_evw.write(LoadNewImageEvent { path });
             }
         }
     }

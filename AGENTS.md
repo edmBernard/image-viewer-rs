@@ -35,7 +35,7 @@ Imports -> Type alias -> CLI args (clap) -> Constants -> App states -> Enums -> 
 
 ### Bevy ECS Patterns
 
-- **Components**: newtype tuple structs (`Id(usize)`, `Scale(f32)`, `Position(Vec2)`) or unit marker structs (`MyImage`, `MyCursor`, `MyText`). All derive `Component`.
+- **Components**: newtype tuple structs (`ImageOf(Entity)`, `Scale(f32)`, `Position(Vec2)`) or unit marker structs (`MyImage`, `MyCursor`, `MyText`). All derive `Component`.
 - **Resources**: newtype tuples or named-field structs. All derive `Resource`.
 - **Events**: called "Messages" in Bevy 0.20. Use `#[derive(Message)]`. Written via `MessageWriter<T>`, read via `MessageReader<T>`.
 - **Entity spawning**: use inline tuple bundles, not custom `Bundle` structs.
@@ -49,7 +49,7 @@ Key event chains:
 - **Image loading**: `LoadNewImageEvent` -> `on_load_image()` decodes image -> `NewImageLoadedEvent` -> `on_image_loaded()` spawns entities -> `on_image_spawned()` triggers `FitToScreen`
 - **Layout**: `MoveImageEvent` triggers position/crop recalculation for all images
 - **Review navigation**: `NavigateReviewEvent` -> loads new image set; `ActivateReviewEvent` -> extracts patterns from current images; `RefreshReviewEvent` -> rescans directory with edited regexes
-- **Image management**: `RemoveImageEvent` -> despawns entities, reassigns contiguous Ids; `ReorderImagesEvent` -> remaps Ids via two-pass rename
+- **Image management**: the `ImageList` resource holds image entities in display order; an image's index in it is its cell. Labels and cursors point to their image with `ImageOf(Entity)`. `RemoveImageEvent(Entity)` despawns the image and its label/cursor; reordering moves the entry in `ImageList` and sends `MoveImageEvent`
 
 ### Configuration
 
@@ -96,7 +96,7 @@ Two groups separated by blank lines:
 | Functions | snake_case verbs | `change_global_zoom`, `toggle_cursor`, `scroll_events` |
 | Variables | snake_case | `cursor_position`, `scale_factor`, `num_images` |
 | Constants | SCREAMING_SNAKE_CASE | `HELP_STRING` |
-| Components (newtype) | PascalCase tuple struct | `Id(usize)`, `Scale(f32)`, `Position(Vec2)` |
+| Components (newtype) | PascalCase tuple struct | `ImageOf(Entity)`, `Scale(f32)`, `Position(Vec2)` |
 | Components (marker) | PascalCase unit struct | `MyImage`, `MyCursor` |
 
 ### Type Annotations
