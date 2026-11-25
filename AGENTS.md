@@ -24,14 +24,23 @@ cargo bundle --release         # Create macOS app bundle (requires cargo-bundle)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/main.rs` | ~2300 | Application entry point, ECS systems, UI, image pipeline |
-| `src/review.rs` | ~400 | Review mode: pattern extraction, directory scanning, file resolution |
+| `src/main.rs` | ~780 | Entry point, app setup and system registration; shared types (config, resources, components, messages) |
+| `src/ui.rs` | ~480 | Egui panels: bottom menu, settings, shortcut editor, image list, review panel |
+| `src/loading.rs` | ~360 | Image pipeline: decoding, tiling into textures, spawning, removal, reload, crop export, sampler |
+| `src/layout.rs` | ~400 | `CellGrid`, image/label/cursor positioning, fit to screen, reset scales |
+| `src/input.rs` | ~330 | Keyboard, mouse, scroll and file drop handlers |
+| `src/color.rs` | ~140 | ICC conversion of decoded images to the screen color space (moxcms) |
+| `src/review_mode.rs` | ~160 | Review mode Bevy systems (navigate, activate, refresh, switch to file) |
+| `src/review.rs` | ~510 | Review mode pure logic: pattern extraction, directory scanning, file resolution |
+| `src/dock_drop.rs` | ~80 | macOS dock drop / "Open With" handler and its polling system |
 
-### Code Organization (top to bottom in main.rs)
+### Code Organization
 
-Sections use `// MARK:` comments:
+Shared types live in `main.rs`, which is the crate root, so modules reach them (and their private fields) through `use crate::{...}` without `pub`. Systems in the other modules are `pub fn` so `main()` can register them; helpers used in a single module stay private.
 
-Imports -> Type alias -> CLI args (clap) -> Constants -> App states -> Enums -> Config structs -> `main()` -> Resources -> Components -> Messages/Events -> Setup -> UI systems (egui) -> Image loading pipeline -> Layout & positioning -> Image reordering/removal -> Keyboard handlers -> Zoom/rotation -> Mouse/scroll input -> Image cropping -> Settings -> macOS dock integration -> Review mode systems -> Utilities
+Sections use `// MARK:` comments. Top to bottom in main.rs:
+
+Imports -> Type alias -> CLI args (clap) -> Constants -> App states -> Enums -> Config structs -> `main()` -> Resources -> Components -> Messages/Events -> Setup -> Settings -> Utilities
 
 ### Bevy ECS Patterns
 
@@ -160,8 +169,9 @@ Rules:
 | clap | 4 | CLI argument parsing (derive mode) |
 | image | 0.25 | Image format decoding/encoding |
 | serde + toml | 1 | Configuration serialization |
-| home | 0.5 | Home directory resolution |
 | regex | 1 | Review mode pattern matching |
+| moxcms | 0.9 | ICC color management (screen color space conversion) |
+| objc2 + objc2-foundation | 0.6 / 0.3 | macOS only: dock drop handler injection |
 | tempfile | 3 | Test-only: temporary directories for review tests |
 
 ### Bevy-Specific Conventions
@@ -174,4 +184,4 @@ Rules:
 
 ### macOS-Specific
 
-`macos_dock_drop` module uses `objc2` to inject `application:openURLs:` into Bevy's Winit delegate at runtime via `class_addMethod()`. Paths queued in a static `Mutex<Vec<String>>`, polled by `poll_dock_drop_queue()` system.
+`macos_dock_drop` module (in `src/dock_drop.rs`) uses `objc2` to inject `application:openURLs:` into Bevy's Winit delegate at runtime via `class_addMethod()`. Paths queued in a static `Mutex<Vec<String>>`, polled by `poll_dock_drop_queue()` system.
