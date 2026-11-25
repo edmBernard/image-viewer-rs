@@ -277,7 +277,6 @@ fn main() -> Result<()> {
         .add_message::<LoadNewImageEvent>()
         .add_message::<NewImageLoadedEvent>()
         .add_message::<MoveImageEvent>()
-        .add_message::<ToggleCursor>()
         .add_message::<SaveCropped>()
         .add_message::<ResetScales>()
         .add_message::<FitToScreen>()
@@ -341,7 +340,7 @@ fn main() -> Result<()> {
                 change_top_image,
                 change_global_rotation,
                 key_toggle_cursor,
-                toggle_cursor,
+                sync_cursors,
                 reset_scales,
                 fit_to_screen,
                 key_save_cropped,
@@ -713,9 +712,6 @@ struct ChangeTitleStyleEvent;
 struct SaveSettingsEvent;
 
 #[derive(Message)]
-struct ToggleCursor;
-
-#[derive(Message)]
 struct SaveCropped;
 
 #[derive(Message)]
@@ -931,9 +927,11 @@ fn ui_bottom_menu(
                         .on_hover_text("When enabled, dropped images are added instead of replacing");
 
                     ui.separator();
-                    ui.toggle_value(&mut review_state.enabled, "Review")
-                        .on_hover_text("Review mode: navigate through similar images");
-                    if review_state.enabled && review_state.radixes.is_empty() {
+                    let review_toggled = ui
+                        .toggle_value(&mut review_state.enabled, "Review")
+                        .on_hover_text("Review mode: navigate through similar images")
+                        .changed();
+                    if review_toggled && review_state.enabled && review_state.radixes.is_empty() {
                         activate_evw.write(ActivateReviewEvent);
                     }
                 },
@@ -949,7 +947,6 @@ fn ui_settings_menu(
     mut recorded_key: ResMut<RecordedPressedKey>,
     ui_state: Res<UiState>,
     mut cursor_state: ResMut<MultiCursorEnabled>,
-    mut cursor_evw: MessageWriter<ToggleCursor>,
     mut change_title_style_evw: MessageWriter<ChangeTitleStyleEvent>,
     mut save_settings_evw: MessageWriter<SaveSettingsEvent>,
     mut change_sampler_evw: MessageWriter<ChangeSamplerEvent>,
@@ -1016,9 +1013,7 @@ fn ui_settings_menu(
                         });
                 });
 
-                if ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor").changed() {
-                    cursor_evw.write(ToggleCursor);
-                };
+                ui.checkbox(&mut cursor_state.0, "Enable Multi Cursor");
 
                 ui.horizontal(|ui| {
                     ui.label("Grid Width:");
@@ -1237,7 +1232,7 @@ fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
 fn on_remove_image(
     mut remove_evr: MessageReader<RemoveImageEvent>,
     mut commands: Commands,
-    owned_query: Query<(Entity, &ImageOf)>,
+    title_query: Query<(Entity, &ImageOf), With<MyText>>,
     mut image_list: ResMut<ImageList>,
     mut move_image_evw: MessageWriter<MoveImageEvent>,
     mut fit_to_screen_evw: MessageWriter<FitToScreen>,
@@ -1250,19 +1245,20 @@ fn on_remove_image(
         };
         image_list.0.remove(slot);
 
-        // The image despawns with its tiles; its label and cursor are separate entities
+        // The image despawns with its tiles; its label is a separate entity (cursors are handled by sync_cursors)
         commands.entity(target).despawn();
-        for (entity, owner) in &owned_query {
+        for (entity, owner) in &title_query {
             if owner.0 == target {
                 commands.entity(entity).despawn();
             }
         }
 
-        // Remove the corresponding review pattern
-        if review_state.enabled && slot < review_state.cell_patterns.len() {
+        // Review patterns are per cell, they follow their image even while review is off,
+        // same as on reorder, so they still line up if review is turned back on
+        if slot < review_state.cell_patterns.len() {
             review_state.cell_patterns.remove(slot);
         }
-        if review_state.enabled && slot < review_state.editable_patterns.len() {
+        if slot < review_state.editable_patterns.len() {
             review_state.editable_patterns.remove(slot);
         }
 
@@ -1389,7 +1385,7 @@ fn on_image_loaded(
     config: Res<Config>,
     mut load_image_evr: MessageReader<NewImageLoadedEvent>,
     mut commands: Commands,
-    owned_query: Query<Entity, With<ImageOf>>,
+    title_query: Query<Entity, With<MyText>>,
     mut help_query: Query<&mut Visibility, With<MyHelp>>,
     font_query: Query<&FontHandle>,
     mut is_new_batch: ResMut<NewImageBatch>,
@@ -1402,7 +1398,7 @@ fn on_image_loaded(
             for &entity in &image_list.0 {
                 commands.entity(entity).despawn();
             }
-            for entity in &owned_query {
+            for entity in &title_query {
                 commands.entity(entity).despawn();
             }
             image_list.0.clear();
@@ -1945,77 +1941,83 @@ fn toggle_help(keys: Res<ButtonInput<KeyCode>>, mut ui_state: ResMut<UiState>) {
 fn key_toggle_cursor(
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<Config>,
-    mut toggle_evw: MessageWriter<ToggleCursor>,
+    mut cursor_state: ResMut<MultiCursorEnabled>,
 ) {
     if keys.just_pressed(config.shortcut.switch_cursor) {
-        toggle_evw.write(ToggleCursor);
+        cursor_state.0 = !cursor_state.0;
     }
 }
 
-fn toggle_cursor(
-    mut toggle_evr: MessageReader<ToggleCursor>,
+// MultiCursorEnabled is the source of truth: this is the only system spawning or despawning cursors,
+// so they follow the image list whatever happens to it (new batch, add mode, removal)
+fn sync_cursors(
     mut commands: Commands,
-    cursor_query: Query<Entity, With<MyCursor>>,
-    mut cursor_state: ResMut<MultiCursorEnabled>,
+    cursor_query: Query<(Entity, &ImageOf), With<MyCursor>>,
+    cursor_state: Res<MultiCursorEnabled>,
     image_list: Res<ImageList>,
 ) {
-    for _ev in toggle_evr.read() {
-        if cursor_query.iter().count() == 0 {
-            *cursor_state = MultiCursorEnabled(true);
-            for &image_entity in &image_list.0 {
-                commands
-                    .spawn((
-                        Transform::from_translation(Vec3::new(0., 0., 1.)),
-                        Visibility::default(),
-                        ImageOf(image_entity),
-                        MyCursor,
-                    ))
-                    .with_children(|parent| {
-                        let cursor_color = Color::srgb(0.75, 0., 0.);
-                        let bar_size = 15.;
-                        let cursor_size = Some(Vec2::new(bar_size, 4.0));
-                        parent.spawn((
-                            Sprite {
-                                color: cursor_color,
-                                custom_size: cursor_size,
-                                ..default()
-                            },
-                            Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
-                                .with_translation(Vec3::new(bar_size, 0., 1.)),
-                        ));
-                        parent.spawn((
-                            Sprite {
-                                color: cursor_color,
-                                custom_size: cursor_size,
-                                ..default()
-                            },
-                            Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
-                                .with_translation(Vec3::new(-bar_size, 0., 1.)),
-                        ));
-                        parent.spawn((
-                            Sprite {
-                                color: cursor_color,
-                                custom_size: cursor_size,
-                                ..default()
-                            },
-                            Transform::from_translation(Vec3::new(0., bar_size, 1.)),
-                        ));
-                        parent.spawn((
-                            Sprite {
-                                color: cursor_color,
-                                custom_size: cursor_size,
-                                ..default()
-                            },
-                            Transform::from_translation(Vec3::new(0., -bar_size, 1.)),
-                        ));
-                    });
-            }
+    let mut has_cursor = Vec::new();
+    for (entity, owner) in &cursor_query {
+        if cursor_state.0 && image_list.slot(owner.0).is_some() {
+            has_cursor.push(owner.0);
         } else {
-            *cursor_state = MultiCursorEnabled(false);
-            for entity in &cursor_query {
-                commands.entity(entity).despawn();
-            }
+            commands.entity(entity).despawn();
         }
+    }
+    if !cursor_state.0 {
+        return;
+    }
+
+    for &image_entity in &image_list.0 {
+        if has_cursor.contains(&image_entity) {
+            continue;
+        }
+        commands
+            .spawn((
+                Transform::from_translation(Vec3::new(0., 0., 1.)),
+                Visibility::default(),
+                ImageOf(image_entity),
+                MyCursor,
+            ))
+            .with_children(|parent| {
+                let cursor_color = Color::srgb(0.75, 0., 0.);
+                let bar_size = 15.;
+                let cursor_size = Some(Vec2::new(bar_size, 4.0));
+                parent.spawn((
+                    Sprite {
+                        color: cursor_color,
+                        custom_size: cursor_size,
+                        ..default()
+                    },
+                    Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
+                        .with_translation(Vec3::new(bar_size, 0., 1.)),
+                ));
+                parent.spawn((
+                    Sprite {
+                        color: cursor_color,
+                        custom_size: cursor_size,
+                        ..default()
+                    },
+                    Transform::from_rotation(Quat::from_rotation_z(-TAU / 4.))
+                        .with_translation(Vec3::new(-bar_size, 0., 1.)),
+                ));
+                parent.spawn((
+                    Sprite {
+                        color: cursor_color,
+                        custom_size: cursor_size,
+                        ..default()
+                    },
+                    Transform::from_translation(Vec3::new(0., bar_size, 1.)),
+                ));
+                parent.spawn((
+                    Sprite {
+                        color: cursor_color,
+                        custom_size: cursor_size,
+                        ..default()
+                    },
+                    Transform::from_translation(Vec3::new(0., -bar_size, 1.)),
+                ));
+            });
     }
 }
 
@@ -2206,8 +2208,8 @@ fn save_cropped(
 
             let subimage = image_view.to_image();
 
-            // Save to disk
-            if let Err(e) = subimage.write_to(&mut buf_out, ImageFormat::Jpeg) {
+            // Saved in the input format so the content matches the extension kept by insert_suffix
+            if let Err(e) = subimage.write_to(&mut buf_out, format) {
                 println!("Failed to write data to file {}: {}", &output_path.display(), e);
                 continue;
             };
@@ -2333,8 +2335,6 @@ fn mouse_button_input(
             // Cursor is outside of the windows
             for (mut position, scale) in &mut image_query {
                 position.0 += mouse_state.delta / (scale.0 * global_scale.0);
-                let delta = mouse_state.delta;
-                mouse_state.origin += delta / (scale.0 * global_scale.0);
             }
             mouse_state.delta = Vec2::ZERO;
             return;
