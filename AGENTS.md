@@ -30,6 +30,8 @@ cargo bundle --release         # Create macOS app bundle (requires cargo-bundle)
 | `src/layout.rs` | ~400 | `CellGrid`, image/label/cursor positioning, fit to screen, reset scales |
 | `src/input.rs` | ~330 | Keyboard, mouse, scroll and file drop handlers |
 | `src/color.rs` | ~140 | ICC conversion of decoded images to the screen color space (moxcms) |
+| `src/flip_mode.rs` | ~400 | FLIP mode Bevy systems (reference selection, background computation of the error maps, display switch) |
+| `src/flip.rs` | ~640 | FLIP pure logic: perceptual difference between two images (LDR-FLIP), error map coloring |
 | `src/review_mode.rs` | ~160 | Review mode Bevy systems (navigate, activate, refresh, switch to file) |
 | `src/review.rs` | ~510 | Review mode pure logic: pattern extraction, directory scanning, file resolution |
 | `src/dock_drop.rs` | ~80 | macOS dock drop / "Open With" handler and its polling system |
@@ -58,6 +60,7 @@ Key event chains:
 - **Image loading**: `LoadImagesEvent { paths, replace }` -> `on_load_image()` decodes images -> `NewImageLoadedEvent` (first one flagged `replace` for a replacing batch) -> `on_image_loaded()` spawns entities -> `on_image_spawned()` triggers `FitToScreen`
 - **Layout**: `MoveImageEvent` triggers position/crop recalculation for all images
 - **Review navigation**: `NavigateReviewEvent` -> loads new image set; `ActivateReviewEvent` -> extracts patterns from current images; `RefreshReviewEvent` -> rescans directory with edited regexes
+- **FLIP**: `ToggleFlipEvent` / `SetFlipReferenceEvent` -> `on_flip_request()` updates `FlipState` and starts a background thread computing the missing error maps -> `poll_flip_job()` attaches each finished map to its image (`FlipTile` on tiles, `FlipScore` on the image) -> `FlipChangedEvent` -> `on_flip_changed()` swaps the tile textures between original and map, and updates the labels
 - **Image management**: the `ImageList` resource holds image entities in display order; an image's index in it is its cell. Labels and cursors point to their image with `ImageOf(Entity)`. `RemoveImageEvent(Entity)` despawns the image and its label/cursor; reordering moves the entry in `ImageList` and sends `MoveImageEvent`
 
 ### Configuration
@@ -72,6 +75,16 @@ Self-contained module for the review feature. Pure functions (no Bevy dependenci
 - `resolve_files_for_radix()`: resolves concrete file paths for a given radix
 
 Has its own test suite using `tempfile` for directory-based tests.
+
+### FLIP Module (`src/flip.rs`)
+
+Pure functions (no Bevy dependencies) implementing LDR-FLIP (Andersson et al., 2020):
+- `FlipParams::new()`: filters and constants for a viewing condition (pixels per degree)
+- `preprocess()`: filtered L\*a\*b\* colors and edge/point features of an image; done once for the reference
+- `flip_errors()`: per pixel error in [0, 1] between two preprocessed images
+- `colorize()`: error map to RGBA8 with the chosen `ColorMap` (magma or viridis)
+
+All filters are separable and run on bands of rows over the available cores (`par_bands`). Results were checked against NVIDIA's `flip-evaluator` (max difference per pixel below 1e-5).
 
 ## Code Style Guidelines
 

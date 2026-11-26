@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderDevice;
 use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat};
@@ -12,10 +13,10 @@ use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat};
 use crate::color::convert_to_screen_space;
 use crate::review_mode::capture_view;
 use crate::{
-    get_short_name, ChangeSamplerEvent, Config, FitToScreen, FontHandle, GlobalScale, ImageList, ImageOf, ImagePath,
-    ImageSize, ImageTile, LoadImagesEvent, MoveImageEvent, MyHelp, MyImage, MyText, MyTile, NewImageLoadedEvent,
-    Position, PreservedView, ReloadImagesEvent, RemoveImageEvent, ReviewState, Rotation, SaveCropped, Scale,
-    ScreenColorSpace, TileRect, ViewRect, FALLBACK_MAX_TEXTURE_SIZE,
+    get_short_name, ChangeSamplerEvent, Config, FitToScreen, FlipTile, FontHandle, GlobalScale, ImageList, ImageOf,
+    ImagePath, ImageSize, ImageTile, LoadImagesEvent, MoveImageEvent, MyHelp, MyImage, MyText, MyTile,
+    NewImageLoadedEvent, Position, PreservedView, ReloadImagesEvent, RemoveImageEvent, ReviewState, Rotation,
+    SaveCropped, Scale, ScreenColorSpace, TileRect, ViewRect, FALLBACK_MAX_TEXTURE_SIZE,
 };
 
 // MARK: Image Loading
@@ -58,7 +59,7 @@ pub fn on_remove_image(
 }
 
 // Decode an image from disk and convert it from its own color space to `target`
-fn decode_image(path: &str, target: ScreenColorSpace) -> Option<DynamicImage> {
+pub fn decode_image(path: &str, target: ScreenColorSpace) -> Option<DynamicImage> {
     let Some(f) = File::open(path).ok() else {
         println!("Failed to open file: {}", path);
         return None;
@@ -108,26 +109,11 @@ pub fn on_load_image(
             };
 
             let size = Vec2::new(image.width() as f32, image.height() as f32);
-            let tile_rects = tile_grid(image.width(), image.height(), max_texture_size);
-            // A single tile takes the decoded buffer as is; larger images are copied tile by tile
-            let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
-                vec![(tile_rects[0], image)]
-            } else {
-                tile_rects
-                    .into_iter()
-                    .map(|r| (r, image.crop_imm(r.min.x, r.min.y, r.width(), r.height())))
-                    .collect()
-            };
-
-            let mut tiles = Vec::with_capacity(tile_images.len());
-            for (rect, tile_image) in tile_images {
-                let Some(mut texture) = to_texture(tile_image) else {
-                    break;
-                };
-                texture.sampler = sampler.clone();
+            let mut tiles = Vec::new();
+            for (rect, texture) in tile_textures(image, max_texture_size, &sampler) {
                 tiles.push(ImageTile {
                     handle: images.add(texture),
-                    rect: rect.as_rect(),
+                    rect,
                 });
             }
             if tiles.is_empty() {
@@ -142,6 +128,30 @@ pub fn on_load_image(
             replace = false;
         }
     }
+}
+
+// Cut an image into textures the GPU accepts. Empty when the pixel format isn't supported.
+pub fn tile_textures(image: DynamicImage, max_texture_size: u32, sampler: &ImageSampler) -> Vec<(Rect, Image)> {
+    let tile_rects = tile_grid(image.width(), image.height(), max_texture_size);
+    // A single tile takes the decoded buffer as is; larger images are copied tile by tile
+    let tile_images: Vec<(URect, DynamicImage)> = if tile_rects.len() == 1 {
+        vec![(tile_rects[0], image)]
+    } else {
+        tile_rects
+            .into_iter()
+            .map(|r| (r, image.crop_imm(r.min.x, r.min.y, r.width(), r.height())))
+            .collect()
+    };
+
+    let mut tiles = Vec::with_capacity(tile_images.len());
+    for (rect, tile_image) in tile_images {
+        let Some(mut texture) = to_texture(tile_image) else {
+            return Vec::new();
+        };
+        texture.sampler = sampler.clone();
+        tiles.push((rect.as_rect(), texture));
+    }
+    tiles
 }
 
 // Split a width x height image into the fewest equally sized tiles whose sides fit in max_size
@@ -311,7 +321,7 @@ pub fn save_cropped(
 pub fn change_sampler(
     mut change_sampler_evr: MessageReader<ChangeSamplerEvent>,
     config: Res<Config>,
-    sprite_query: Query<&Sprite, With<MyTile>>,
+    sprite_query: Query<(&Sprite, Option<&FlipTile>), With<MyTile>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if change_sampler_evr.is_empty() {
@@ -321,11 +331,19 @@ pub fn change_sampler(
 
     let new_sampler = config.misc.sampler_mode.sampler();
 
-    for sprite in &sprite_query {
-        let Some(mut image) = images.get_mut(&sprite.image) else {
-            continue;
-        };
-        image.sampler = new_sampler.clone();
+    for (sprite, flip_tile) in &sprite_query {
+        // A tile with a FLIP map shows one of its two textures, the other one must follow too
+        let mut handles = vec![&sprite.image];
+        if let Some(flip_tile) = flip_tile {
+            handles.push(&flip_tile.original);
+            handles.push(&flip_tile.flip);
+        }
+        for handle in handles {
+            let Some(mut image) = images.get_mut(handle) else {
+                continue;
+            };
+            image.sampler = new_sampler.clone();
+        }
     }
 }
 

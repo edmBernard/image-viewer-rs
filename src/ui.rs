@@ -1,15 +1,19 @@
 // Egui panels: bottom menu, settings, shortcut editor, image list and review panel
 
 use bevy::prelude::*;
+use bevy::window::Monitor;
+use bevy::window::OnMonitor;
 use bevy_egui::egui::CollapsingHeader;
 use bevy_egui::{egui, EguiContexts};
 
+use crate::flip::ColorMap;
+use crate::flip_mode::viewing_pixels_per_degree;
 use crate::{
     get_short_name, key_label, ActivateReviewEvent, AddMode, ChangeSamplerEvent, ChangeTitleStyleEvent, Config,
-    FitToScreen, GlobalScale, GridLayout, GridLayoutState, ImageList, ImagePath, MoveImageEvent, MultiCursorEnabled,
-    MyAppState, MyImage, NavigateReviewEvent, RecordedPressedKey, RefreshReviewEvent, ReloadImagesEvent,
-    RemoveImageEvent, ResetScales, ReviewState, SamplerMode, SaveCropped, SaveSettingsEvent, ScreenColorSpace,
-    ScrollBehavior, UiPanelArea, UiState,
+    FitToScreen, FlipState, GlobalScale, GridLayout, GridLayoutState, ImageList, ImagePath, MoveImageEvent,
+    MultiCursorEnabled, MyAppState, MyImage, NavigateReviewEvent, RecomputeFlipEvent, RecordedPressedKey,
+    RefreshReviewEvent, ReloadImagesEvent, RemoveImageEvent, ResetScales, ReviewState, SamplerMode, SaveCropped,
+    SaveSettingsEvent, ScreenColorSpace, ScrollBehavior, SetFlipReferenceEvent, ToggleFlipEvent, UiPanelArea, UiState,
 };
 
 // MARK: Panel Root
@@ -75,6 +79,9 @@ pub fn ui_bottom_menu(
     mut activate_evw: MessageWriter<ActivateReviewEvent>,
     mut panel_area: ResMut<UiPanelArea>,
     image_list: Res<ImageList>,
+    flip_state: Res<FlipState>,
+    mut toggle_flip_evw: MessageWriter<ToggleFlipEvent>,
+    mut flip_reference_evw: MessageWriter<SetFlipReferenceEvent>,
 ) {
     if ui_state.visible {
         let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -155,6 +162,23 @@ pub fn ui_bottom_menu(
                     if review_toggled && review_state.enabled && review_state.radixes.is_empty() {
                         activate_evw.write(ActivateReviewEvent);
                     }
+
+                    ui.separator();
+                    let mut flip_shown = flip_state.shown;
+                    if ui
+                        .toggle_value(&mut flip_shown, "FLIP")
+                        .on_hover_text("Show the FLIP error map of each image against the reference image")
+                        .changed()
+                    {
+                        toggle_flip_evw.write(ToggleFlipEvent);
+                    }
+                    if ui
+                        .button("Ref")
+                        .on_hover_text("Use the selected image (the one on top in Stack layout) as FLIP reference")
+                        .clicked()
+                    {
+                        flip_reference_evw.write(SetFlipReferenceEvent);
+                    }
                 },
             );
         });
@@ -173,6 +197,9 @@ pub fn ui_settings_menu(
     mut save_settings_evw: MessageWriter<SaveSettingsEvent>,
     mut change_sampler_evw: MessageWriter<ChangeSamplerEvent>,
     mut reload_images_evw: MessageWriter<ReloadImagesEvent>,
+    mut recompute_flip_evw: MessageWriter<RecomputeFlipEvent>,
+    window_query: Query<&OnMonitor, With<Window>>,
+    monitor_query: Query<&Monitor>,
     mut next_state: ResMut<NextState<MyAppState>>,
     mut panel_area: ResMut<UiPanelArea>,
 ) {
@@ -231,6 +258,62 @@ pub fn ui_settings_menu(
                             }
                             if changed {
                                 reload_images_evw.write(ReloadImagesEvent);
+                            }
+                        });
+                });
+
+                // Recomputing the maps is heavy, wait for the end of the drag or of the typing
+                ui.horizontal(|ui| {
+                    ui.label("FLIP Screen Diagonal:")
+                        .on_hover_text("Size of the screen; FLIP ignores differences too fine to be seen");
+                    let response = ui.add(
+                        egui::DragValue::new(&mut config.flip.screen_diagonal_inches)
+                            .speed(0.1)
+                            .range(1.0..=200.)
+                            .suffix(" in"),
+                    );
+                    if response.drag_stopped() || response.lost_focus() {
+                        recompute_flip_evw.write(RecomputeFlipEvent);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("FLIP Viewing Distance:")
+                        .on_hover_text("Distance between you and the screen");
+                    let response = ui.add(
+                        egui::DragValue::new(&mut config.flip.viewing_distance_cm)
+                            .speed(0.5)
+                            .range(1.0..=1000.)
+                            .suffix(" cm"),
+                    );
+                    if response.drag_stopped() || response.lost_focus() {
+                        recompute_flip_evw.write(RecomputeFlipEvent);
+                    }
+                });
+                let (pixels_per_degree, resolution) = viewing_pixels_per_degree(&config, &window_query, &monitor_query);
+                match resolution {
+                    Some(resolution) => ui.weak(format!(
+                        "{:.1} pixels per degree on this {}x{} screen",
+                        pixels_per_degree, resolution.x, resolution.y
+                    )),
+                    None => ui.weak(format!(
+                        "Screen resolution unknown, using {:.0} pixels per degree",
+                        pixels_per_degree
+                    )),
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label("FLIP Color Map:");
+                    egui::ComboBox::from_id_salt("flip_color_map")
+                        .selected_text(config.flip.color_map.label())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            for color_map in ColorMap::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut config.flip.color_map, color_map, color_map.label())
+                                    .changed();
+                            }
+                            if changed {
+                                recompute_flip_evw.write(RecomputeFlipEvent);
                             }
                         });
                 });

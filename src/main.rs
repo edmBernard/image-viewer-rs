@@ -4,6 +4,8 @@
 
 mod color;
 mod dock_drop;
+mod flip;
+mod flip_mode;
 mod input;
 mod layout;
 mod loading;
@@ -17,6 +19,8 @@ use std::fs::canonicalize;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::sync::Mutex;
 
 use bevy::camera::Hdr;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
@@ -31,6 +35,7 @@ use moxcms::ColorProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::dock_drop::{poll_dock_drop_queue, store_event_loop_proxy};
+use crate::flip_mode::{key_toggle_flip, on_flip_changed, on_flip_request, poll_flip_job, FlipResult};
 use crate::input::{
     change_global_rotation, change_global_zoom, change_layout_on_click, change_rotation_individually, change_top_image,
     change_zoom_individually, cursor_move, file_drop, key_change_layout, key_save_cropped, key_toggle_add_mode,
@@ -162,11 +167,18 @@ struct ConfigShortcut {
     switch_layout: Key,
     rotate_images: Key,
     add_images: Key,
+    // default so config files written before this shortcut existed keep loading
+    #[serde(default = "default_toggle_flip")]
+    toggle_flip: Key,
+}
+
+fn default_toggle_flip() -> Key {
+    Key::Character("f".into())
 }
 
 impl ConfigShortcut {
     // Labelled shortcuts, in the order shown in the settings panel
-    fn entries_mut(&mut self) -> [(&'static str, &mut Key); 7] {
+    fn entries_mut(&mut self) -> [(&'static str, &mut Key); 8] {
         [
             ("Save Crop:", &mut self.save_crop_image),
             ("Local Zoom Modifier:", &mut self.local_zoom_modifier),
@@ -175,6 +187,7 @@ impl ConfigShortcut {
             ("Rotate:", &mut self.rotate_images),
             ("Add Images:", &mut self.add_images),
             ("Change Layout:", &mut self.switch_layout),
+            ("Toggle FLIP:", &mut self.toggle_flip),
         ]
     }
 }
@@ -197,6 +210,26 @@ struct ConfigMisc {
     sampler_mode: SamplerMode,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(default)]
+struct ConfigFlip {
+    // Viewing condition: FLIP ignores the differences too fine to be seen from that distance on that screen.
+    // The resolution comes from the monitor the window is on.
+    screen_diagonal_inches: f32,
+    viewing_distance_cm: f32,
+    color_map: flip::ColorMap,
+}
+
+impl Default for ConfigFlip {
+    fn default() -> Self {
+        ConfigFlip {
+            screen_diagonal_inches: 27.,
+            viewing_distance_cm: 60.,
+            color_map: flip::ColorMap::default(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Resource)]
 struct Config {
     text: ConfigText,
@@ -206,6 +239,8 @@ struct Config {
     // default so config files predating this section keep loading
     #[serde(default)]
     color: ConfigColor,
+    #[serde(default)]
+    flip: ConfigFlip,
 }
 
 // MARK: Main
@@ -297,6 +332,7 @@ fn main() -> Result<()> {
         .init_resource::<UiPanelArea>()
         .insert_resource(ReviewState::default())
         .insert_resource(PreservedView::default())
+        .init_resource::<FlipState>()
         .add_systems(Startup, setup)
         .add_message::<LoadImagesEvent>()
         .add_message::<NewImageLoadedEvent>()
@@ -313,6 +349,10 @@ fn main() -> Result<()> {
         .add_message::<RefreshReviewEvent>()
         .add_message::<ActivateReviewEvent>()
         .add_message::<SwitchReviewToFileEvent>()
+        .add_message::<ToggleFlipEvent>()
+        .add_message::<SetFlipReferenceEvent>()
+        .add_message::<FlipChangedEvent>()
+        .add_message::<RecomputeFlipEvent>()
         // Egui systems must run in EguiPrimaryContextPass (not Update)
         .add_systems(EguiPrimaryContextPass, configure_visuals.run_if(run_once))
         .add_systems(
@@ -384,6 +424,15 @@ fn main() -> Result<()> {
             )
                 .run_if(in_state(MyAppState::Working)),
         )
+        .add_systems(
+            Update,
+            (
+                key_toggle_flip,
+                // Chained so a map received this frame is on screen this frame
+                (on_flip_request, poll_flip_job, on_flip_changed).chain(),
+            )
+                .run_if(in_state(MyAppState::Working)),
+        )
         .add_systems(PreUpdate, track_shortcut_keys.after(InputSystems))
         .add_systems(Update, update_help_text)
         .add_systems(Update, record_pressed_key.run_if(in_state(MyAppState::EditShortCut)))
@@ -409,6 +458,10 @@ fn main() -> Result<()> {
                 redraw_while_pending::<RefreshReviewEvent>,
                 redraw_while_pending::<ActivateReviewEvent>,
                 redraw_while_pending::<SwitchReviewToFileEvent>,
+                redraw_while_pending::<ToggleFlipEvent>,
+                redraw_while_pending::<SetFlipReferenceEvent>,
+                redraw_while_pending::<FlipChangedEvent>,
+                redraw_while_pending::<RecomputeFlipEvent>,
                 redraw_while_pending::<AssetEvent<Image>>,
             ),
         )
@@ -589,6 +642,27 @@ struct PreservedView {
     cells: Vec<(f32, Vec2)>,
 }
 
+// FLIP mode: every image but the reference is replaced by the map of its perceptual difference
+// with the reference. Maps are kept once computed, so showing and hiding them is instant.
+#[derive(Resource, Default)]
+struct FlipState {
+    shown: bool,
+    reference: Option<Entity>,
+    // Cell of the reference: when its image is replaced (review navigation, reload),
+    // the new image of that cell takes over
+    reference_slot: usize,
+    // Bumped whenever the maps computed so far stop being valid
+    generation: u32,
+    job: Option<FlipJob>,
+}
+
+// Maps being computed on a background thread; dropping the job makes the thread stop after its current image
+struct FlipJob {
+    receiver: Mutex<Receiver<FlipResult>>,
+    // Images still waiting for their map
+    pending: Vec<Entity>,
+}
+
 // MARK: Components
 // Links a label or cursor entity to the image it belongs to
 #[derive(Component)]
@@ -628,6 +702,21 @@ struct MyTile;
 // Area of the full image covered by a tile, in image pixel coordinates
 #[derive(Component)]
 struct TileRect(Rect);
+
+// On a tile with a FLIP map: its two textures, the sprite shows one or the other
+#[derive(Component)]
+struct FlipTile {
+    generation: u32,
+    original: Handle<Image>,
+    flip: Handle<Image>,
+}
+
+// On an image with a FLIP map: its mean error against the reference
+#[derive(Component)]
+struct FlipScore {
+    generation: u32,
+    mean: f32,
+}
 
 #[derive(Component)]
 struct MyText;
@@ -700,6 +789,21 @@ struct ActivateReviewEvent;
 // Drag-to-switch: jump to the review set that the dropped file belongs to.
 #[derive(Message)]
 struct SwitchReviewToFileEvent(String);
+
+#[derive(Message)]
+struct ToggleFlipEvent;
+
+// Take the selected image (the one on top in Stack layout) as FLIP reference
+#[derive(Message)]
+struct SetFlipReferenceEvent;
+
+// A FLIP setting changed: the maps have to be computed again
+#[derive(Message)]
+struct RecomputeFlipEvent;
+
+// The FLIP state or a map changed: textures and labels need a refresh
+#[derive(Message)]
+struct FlipChangedEvent;
 
 // MARK: Setup
 fn setup(
@@ -793,6 +897,7 @@ fn help_string(shortcut: &ConfigShortcut) -> String {
     let add = key_label(&shortcut.add_images);
     let cursor = key_label(&shortcut.switch_cursor);
     let save = key_label(&shortcut.save_crop_image);
+    let flip = key_label(&shortcut.toggle_flip);
     format!(
         "Keyboard Shortcut:
     {layout}: Change Layout (Grid, Stack, Horizontal, Vertical)
@@ -806,6 +911,7 @@ fn help_string(shortcut: &ConfigShortcut) -> String {
     {add}: Toggle 'Add Mode' (dropped images are added instead of replacing)
     {cursor}: Toggle multi cursor
     {save}: Save image to disk with the displayed crop (suffixed by _crop)
+    {flip}: Toggle FLIP error maps against the reference image
     H: Toggle Interface
 
     Drag and Drop image from files explorer.

@@ -14,6 +14,8 @@ switch_layout = { Character = "l" }
 rotate_images = { Character = "r" }
 # Shortcut to toggle add mode (dropped images are added instead of replacing)
 add_images = { Character = "a" }
+# Shortcut to show/hide the FLIP error maps against the reference image
+toggle_flip = { Character = "f" }
 
 [text]
 # Color of the image name shown in the corner
@@ -36,3 +38,12 @@ sampler_mode = "Nearest"
 # Color space of the physical screen; images are converted to it at load.
 # One of: Srgb, AdobeRgb, DisplayP3, Rec2020
 screen_color_space = "Srgb"
+
+[flip]
+# Viewing condition: FLIP ignores the differences too fine to be seen from that distance on that screen
+# Diagonal of the screen, in inches
+screen_diagonal_inches = 27.0
+# Distance between the viewer and the screen, in centimeters
+viewing_distance_cm = 60.0
+# Colors of the error map. One of: Magma, Viridis
+color_map = "Magma"
